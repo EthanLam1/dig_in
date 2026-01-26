@@ -3,9 +3,13 @@
 ## Goal
 Book restaurant reservations for the user via an AI phone agent:
 
-1. User enters a restaurant phone number + reservation details (time, party size, name, callback phone)
+1. User enters a restaurant phone number and chooses either
+   a. Book a reservation (time, party size, name, callback phone), or
+   b. Ask questions only (no reservation details required)
 2. User optionally adds extra questions (wait time, dietary options, hours, etc.)
-3. AI places **one** outbound call (Retell), attempts to **book the reservation**, and asks any extra questions
+3. AI places **one** outbound call (Retell), and:
+   a. books a reservation (if requested), and/or
+   b. asks extra questions one at a time
 4. App displays:
    - **Reservation outcome** (confirmed / failed / needs follow-up) + key details
    - **Structured answers** for extra questions
@@ -33,12 +37,13 @@ Only two routes:
 
 ### `/` Landing + New Reservation Call Form
 
-**Reservation Inputs (required)**
-- Restaurant phone (**required**, **E.164 only**, e.g. `+14165551234`)
-- Reservation date/time (**required**, next **3 days** for MVP; interpreted as **user local timezone** and clearly indicated in UI)
-- Party size (**required**, integer)
-- Reservation name (**required**)
-- Callback phone (**required**, **E.164**; the number the restaurant will associate with the reservation)
+**Reservation Inputs (required if “Book a reservation” is enabled)**
+If the user chooses ‘Questions only’, these fields are hidden/optional and not required.
+- Restaurant phone (**E.164 only**, e.g. `+14165551234`)
+- Reservation date/time (next **3 days** for MVP; interpreted as **user local timezone** and clearly indicated in UI)
+- Party size (integer)
+- Reservation name
+- Callback phone (**E.164**; the number the restaurant will associate with the reservation)
 
 **Optional extras**
 - Restaurant name (optional label for UI/history)
@@ -80,6 +85,7 @@ On success, create the call and navigate to `/calls` with the newly created call
 - Created time (local display)
 - Status badge (`queued/calling/connected/completed/failed`)
 - Reservation outcome badge (when available): Confirmed ✅ / Failed ❌ / Needs follow-up ⚠️
+- If call_intent='questions_only', show badge “Questions only”
 
 **Call details**
 - Status timeline:
@@ -93,6 +99,7 @@ On success, create the call and navigate to `/calls` with the newly created call
   - Status: confirmed / failed / needs_followup
   - Confirmed details (if any): time, party size, name, callback phone, confirmation number (if provided)
   - Failure reason (if any): fully booked, no reservations, online only, call back later, etc.
+  - “If call_intent='questions_only', hide the Reservation Outcome section and show a small label like ‘Questions only call’.”
 
 - **Extra Questions Results**
   - Each question shown with answer + details + confidence
@@ -123,7 +130,7 @@ On success, create the call and navigate to `/calls` with the newly created call
 
 ### End-to-end flow
 1. User submits reservation + extra questions on `/`
-2. Server validates inputs and stores call row with `status='queued'` and reservation request fields
+2. Server validates inputs and stores call row with call_intent, and reservation request fields if booking is requested
 3. Server triggers Retell outbound call; stores `provider_call_id`; updates status
 4. Retell sends webhook events (started/connected/ended)
 5. On call end, server stores final transcript and sets `is_extracting=true`
@@ -165,6 +172,7 @@ Existing fields:
 - `user_id` (uuid, NULL) — reserved for future Supabase Auth
 - `restaurant_name` (text, NULL)
 - `restaurant_phone_e164` (text, NOT NULL)
+- `call_intent` (text) — make_reservation|questions_only
 - `questions_json` (jsonb, NOT NULL) — extra questions (presets + custom)
 - `status` (text, NOT NULL)
 - `is_extracting` (boolean, default false)
@@ -175,14 +183,14 @@ Existing fields:
 - `created_at`, `updated_at`
 
 New reservation request fields (P0):
-- `reservation_name` (text, NOT NULL)
-- `reservation_phone_e164` (text, NOT NULL)
-- `reservation_datetime_local_iso` (text, NOT NULL) — local ISO string (no Z)
-- `reservation_timezone` (text, NOT NULL) — IANA timezone (e.g., America/Toronto)
-- `reservation_party_size` (int, NOT NULL)
+- `reservation_name` (text, nullable; required only when call_intent='make_reservation')
+- `reservation_phone_e164` (text, nullable; required only when call_intent='make_reservation')
+- `reservation_datetime_local_iso` (text, nullable; required only when call_intent='make_reservation') — local ISO string (no Z)
+- `reservation_timezone` (text, nullable; required only when call_intent='make_reservation') — IANA timezone (e.g., America/Toronto)
+- `reservation_party_size` (int, nullable; required only when call_intent='make_reservation')
 
 New reservation result fields (P0):
-- `reservation_status` (text, NULL) — `requested|confirmed|failed|needs_followup`
+- `reservation_status` (text, NULL) — set to requested|confirmed|failed|needs_followup only when call_intent='make_reservation'
 - `reservation_result_json` (jsonb, NULL) — confirmation number, confirmed time, notes, failure reason/category
 
 ### `call_artifacts`
@@ -198,6 +206,8 @@ New reservation result fields (P0):
 ## API Surface
 
 ### `POST /api/calls`
+- Accepts call_intent = make_reservation or questions_only
+- If questions_only, reservation fields are not required and reservation_status remains null
 - Validates required reservation inputs:
   - restaurant phone (E.164)
   - reservation datetime (next 3 days for MVP, user local timezone)

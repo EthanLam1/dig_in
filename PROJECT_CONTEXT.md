@@ -5,7 +5,7 @@ Source of truth for implementation.
 
 ## 0) Summary
 
-Dig In is a Next.js web app that books restaurant reservations via a voice agent (Retell). Users provide restaurant phone + reservation details (time, party size, name, callback phone) and optional extra questions. The agent calls the restaurant, attempts to book the reservation, asks extra questions one at a time, and ends. The app shows call progress, reservation outcome, structured answers, and transcript.
+Dig In is a Next.js web app that books restaurant reservations via a voice agent (Retell). Users provide a restaurant phone and either (a) reservation details (time, party size, name, callback phone) to book a reservation, or (b) optional extra questions only. The agent calls the restaurant, attempts to book the reservation, asks extra questions one at a time, and ends. The app shows call progress, reservation outcome, structured answers, and transcript.
 
 ## 1) Stack
 
@@ -39,10 +39,15 @@ Only two routes:
 
 ### 3.1 `/` New Reservation Call
 
-Required inputs:
+**Always required inputs:**
 
 - `restaurant_phone_e164` (E.164 only, e.g. `+14165551234`)
     
+- `call_intent` (`make_reservation` | `questions_only`)
+    
+
+**Required only if `call_intent = make_reservation`:**
+
 - `reservation_datetime_local_iso` (local ISO, no Z, e.g. `2026-01-26T19:00:00`)
     
 - `reservation_timezone` (IANA, e.g. `America/Toronto`)
@@ -121,7 +126,9 @@ List (left panel):
         
     - status badge (`queued/calling/connected/completed/failed`)
         
-    - reservation_status badge (if available): `confirmed|failed|needs_followup|requested`
+    - If `call_intent = make_reservation`, show reservation_status badge: `requested|confirmed|failed|needs_followup`
+        
+    - If `call_intent = questions_only`, show badge: `Questions only`
         
 
 Details (right panel):
@@ -183,6 +190,12 @@ Processing flag:
 Reservation result status:
 
 - `requested`, `confirmed`, `failed`, `needs_followup` (nullable until extracted)
+
+Call_intent:
+
+- make_reservation → set reservation_status='requested' on creation
+
+- questions_only → reservation_status remains NULL
     
 
 Terminal definition for polling:
@@ -205,6 +218,8 @@ Existing:
 - `restaurant_name` text NULL
     
 - `restaurant_phone_e164` text NOT NULL
+
+- `call_intent` text NOT NULL default make_reservation
     
 - `questions_json` jsonb NOT NULL (extra questions only)
     
@@ -225,17 +240,17 @@ Existing:
 - `updated_at` timestamptz default now()
     
 
-New reservation request fields (P0):
+Reservation request fields (nullable; required only when call_intent = make_reservation):
 
-- `reservation_name` text NOT NULL
+- `reservation_name` text NULL
     
-- `reservation_phone_e164` text NOT NULL
+- `reservation_phone_e164` text NULL
     
-- `reservation_datetime_local_iso` text NOT NULL
+- `reservation_datetime_local_iso` text NULL
     
-- `reservation_timezone` text NOT NULL
+- `reservation_timezone` text NULL
     
-- `reservation_party_size` int NOT NULL
+- `reservation_party_size` int NULL
     
 
 New reservation result fields (P0):
@@ -315,6 +330,9 @@ Rules:
 ### 6.2 Extraction output (`call_artifacts.answers_json`)
 
 This includes reservation outcome + extra question answers.
+
+
+If call_intent = questions_only, reservation may be omitted or present with status=null. Prefer omitting the reservation object entirely.
 
 Example:
 
@@ -414,6 +432,8 @@ Request body example:
 
   "reservation_phone_e164": "+14165550000",
 
+  "call_intent": "make_reservation",
+
   "reservation_datetime_local_iso": "2026-01-26T19:00:00",
 
   "reservation_timezone": "America/Toronto",
@@ -430,17 +450,27 @@ Response:
 
 Validation rules:
 
-- restaurant_phone_e164 and reservation_phone_e164 must be E.164 (starts with `+` then digits only)
+- `restaurant_phone_e164` must be E.164 (starts with `+` then digits only)
     
-- reservation_party_size integer in [1..20]
+- `call_intent` must be one of: `make_reservation` | `questions_only`
     
-- reservation datetime must be within next 3 days inclusive in provided timezone
+- If `call_intent = make_reservation`:
     
-- reservation_name non-empty
+    - `reservation_phone_e164` must be E.164 (starts with `+` then digits only)
+        
+    - `reservation_party_size` integer in [1..20]
+        
+    - `reservation_datetime_local_iso` + `reservation_timezone` must be within next 3 days inclusive in the provided timezone
+        
+    - `reservation_name` non-empty
+        
+- If `call_intent = questions_only`:
     
-- questions normalized + limits enforced (section 6.1)
+    - reservation fields (`reservation_*`) MUST be omitted or allowed to be null, and no reservation validation should run
+        
+- `questions` normalized + limits enforced (section 6.1)
     
-- session_id cookie must exist (else 400)
+- `session_id` cookie must exist (else 400)
     
 
 Behavior:
@@ -450,6 +480,10 @@ Behavior:
     - status = `queued` (or `calling` immediately after Retell returns; either is OK but be consistent)
         
     - reservation_status = `requested`
+
+- If make_reservation: set reservation_status = requested
+
+- If questions_only: set reservation_status = NULL
         
 - Create Retell call using dynamic variables (see section 9)
     
@@ -474,6 +508,8 @@ Query params:
 
 Response example:
 
+(reservation_status may be null for call_intent = questions_only.)
+
 {
 
   "items": [
@@ -485,6 +521,8 @@ Response example:
       "restaurant_name": "Sushi Place",
 
       "restaurant_phone_e164": "+14165551234",
+
+      "call_intent": "make_reservation",
 
       "status": "calling",
 
@@ -520,6 +558,8 @@ Purpose:
 
 Response example:
 
+(If call_intent=questions_only, reservation_* fields will be null and reservation_status/result_json null.)
+
 {
 
   "id": "uuid",
@@ -528,7 +568,7 @@ Response example:
 
   "restaurant_phone_e164": "+14165551234",
 
-  
+  "call_intent": "make_reservation",
 
   "reservation_name": "Ethan",
 
@@ -540,17 +580,11 @@ Response example:
 
   "reservation_party_size": 2,
 
-  
-
   "reservation_status": "confirmed",
 
   "reservation_result_json": { "...": "optional summary for dashboard" },
 
-  
-
   "questions_json": { "...": "extra questions" },
-
-  
 
   "status": "completed",
 
@@ -559,9 +593,7 @@ Response example:
   "failure_reason": null,
 
   "failure_details": null,
-
   
-
   "artifacts": {
 
     "answers_json": { "...": "section 6.2" },
@@ -655,7 +687,14 @@ Environment variables:
 - `OPENAI_MODEL` (default `gpt-4o-mini`)
     
 
-Dynamic variables passed to the agent MUST include:
+**Always include:**
+
+- `call_intent`
+    
+- `questions_to_ask`
+    
+
+**Include only when `call_intent = make_reservation`:**
 
 - `reservation_name`
     
@@ -667,8 +706,6 @@ Dynamic variables passed to the agent MUST include:
     
 - `reservation_party_size`
     
-- `questions_to_ask` (string; one question per line, including reservation attempt first)
-    
 
 `questions_to_ask` format example (one per line):
 
@@ -679,7 +716,13 @@ Dynamic variables passed to the agent MUST include:
 - “Do you have vegan options?”
     
 
-The agent MUST ask one at a time, attempt booking, confirm details, and end.
+`questions_to_ask` rules:
+
+- If make_reservation, first line includes booking instruction.
+
+- If questions_only, do NOT include booking instruction.
+
+- The agent MUST ask one at a time, attempt booking, confirm details, and end.
 
 
 ## 10) Extensibility for Nice-to-Haves
@@ -691,6 +734,7 @@ The MVP is designed so these are additive changes:
   - Future optional DB columns (nullable) may be added without breaking current flows:
     - `restaurant_place_id`, `restaurant_address`, `restaurant_lat`, `restaurant_lng`
   - UI should treat “manual entry” and “Places selection” as two inputs that produce the same canonical restaurant fields.
+  - Places selection should populate restaurant_name, restaurant_phone_e164, and optionally restaurant_place_id later.
 
 - **Flexible reservation window:**
   - Keep current exact-time fields as the canonical request.
