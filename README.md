@@ -262,7 +262,8 @@ This contains optional “extra questions” beyond the reservation booking. Exa
     "name": "Ethan",
     "callback_phone_e164": "+14165551234",
     "confirmation_number": "A1B2C3",
-    "failure_reason": null
+    "failure_reason": null,
+    "failure_category": null
   },
   "answers": [
     {
@@ -277,6 +278,15 @@ This contains optional “extra questions” beyond the reservation booking. Exa
   "overall_notes": "Host mentioned weekends fill up quickly."
 }
 ```
+
+`failure_category` suggested values:
+- `no_reservations`
+- `fully_booked`
+- `online_only`
+- `needs_credit_card`
+- `call_back_later`
+- `unclear`
+- `other`
 
 ---
 
@@ -315,3 +325,12 @@ This contains optional “extra questions” beyond the reservation booking. Exa
 - Realtime updates (websockets or Supabase realtime)
 
 - Improved calling policies/compliance UX text and call scripting
+
+
+## Extensibility Notes (Nice-to-Haves)
+
+This MVP is intentionally structured so future scope is additive:
+
+- **Nearby restaurants (Google Places):** the app’s “restaurant selection” currently produces `restaurant_name` + `restaurant_phone_e164`. A Places integration can simply populate these same fields and optionally add new nullable metadata fields (e.g., place_id/address/lat/lng) without changing the core call flow.
+- **Flexible reservation window:** reservation requests are stored in dedicated `reservation_*` fields, and outcomes are stored in `reservation_result_json`. Adding a time range later can be done by introducing optional window fields while keeping the same extraction + dashboard flow (the agent books the best available time and the chosen time is reflected in `reservation_result_json` and `answers_json.reservation`).
+- **Full auth:** the schema already includes `user_id` alongside `session_id`. Supabase Auth can be added by scoping reads to `user_id` and migrating existing session calls to a user upon login.

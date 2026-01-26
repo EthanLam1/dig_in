@@ -681,7 +681,34 @@ Dynamic variables passed to the agent MUST include:
 
 The agent MUST ask one at a time, attempt booking, confirm details, and end.
 
-## 10) Cursor Rules (critical)
+
+## 10) Extensibility for Nice-to-Haves
+
+The MVP is designed so these are additive changes:
+
+- **Nearby restaurants (Google Places):**
+  - Keep restaurant selection normalized to the existing fields: `restaurant_name` + `restaurant_phone_e164`.
+  - Future optional DB columns (nullable) may be added without breaking current flows:
+    - `restaurant_place_id`, `restaurant_address`, `restaurant_lat`, `restaurant_lng`
+  - UI should treat “manual entry” and “Places selection” as two inputs that produce the same canonical restaurant fields.
+
+- **Flexible reservation window:**
+  - Keep current exact-time fields as the canonical request.
+  - Future optional fields (nullable) can be added:
+    - `reservation_window_start_local_iso`, `reservation_window_end_local_iso`
+  - Agent behavior becomes: “book any available slot in the window,” and the chosen slot is stored in `reservation_result_json` + `answers_json.reservation.confirmed_datetime_local_iso`.
+
+- **Full auth (Supabase Auth):**
+  - `calls.user_id` remains nullable and can be populated after login.
+  - Future behavior: scope history by `user_id` (cross-device), and migrate existing `session_id` calls to `user_id` upon login.
+  - During migration period, reads may be `(user_id == authed_user) OR (session_id == current_session)`.
+
+- **Webhook security hardening:**
+  - MVP uses `x-dig-in-webhook-secret`.
+  - Future improvement: replace or augment with Retell’s official signature verification without changing endpoint paths or payload storage.
+
+
+## 11) Cursor Rules (critical)
 
 - Do NOT add new routes beyond `/` and `/calls`
     
