@@ -10,6 +10,15 @@ import { extractAnswers } from "@/lib/extractAnswers";
 // Status progression order (forward-only updates)
 const STATUS_ORDER = ["queued", "calling", "connected", "completed", "failed"];
 
+// Disconnection reasons indicating no human was reached
+// See Retell docs: https://docs.retellai.com/api-references/list-calls
+const NO_HUMAN_REACHED_REASONS = new Set([
+  "voicemail_reached",
+  "dial_no_answer",
+  "dial_busy",
+  "dial_failed",
+]);
+
 function canProgressStatus(
   currentStatus: string,
   newStatus: string
@@ -61,6 +70,7 @@ export async function POST(request: NextRequest) {
       call_id?: string;
       transcript?: string;
       transcript_object?: unknown;
+      disconnection_reason?: string;
       [key: string]: unknown;
     };
   };
@@ -87,7 +97,7 @@ export async function POST(request: NextRequest) {
   const supabase = getSupabaseAdmin();
   const { data: callRow, error: fetchError } = await supabase
     .from("calls")
-    .select("id, status")
+    .select("id, status, is_extracting")
     .eq("provider_call_id", providerCallId)
     .single();
 
@@ -101,21 +111,37 @@ export async function POST(request: NextRequest) {
 
   const callId = callRow.id;
   const currentStatus = callRow.status;
+  const currentIsExtracting = callRow.is_extracting;
 
-  // 7. Status mapping (idempotent, forward-only)
-  let newStatus: string | null = null;
+  // 6.5. Idempotency check: if call is already terminal, short-circuit
+  // A call is terminal if status is 'completed' or 'failed' AND is_extracting is false
+  // Retell can retry/duplicate webhooks, so we skip processing for already-finished calls
+  const isTerminal =
+    (currentStatus === "completed" || currentStatus === "failed") &&
+    !currentIsExtracting;
 
-  switch (event) {
-    case "call_started":
-      newStatus = "calling";
-      break;
-    case "call_ended":
-    case "call_analyzed":
-      newStatus = "completed";
-      break;
-    default:
-      // Unknown event - just log and acknowledge
-      console.log(`[Retell Webhook] Unknown event: ${event}`);
+  if (isTerminal) {
+    console.log(
+      `[Retell Webhook] Call ${callId} is already terminal (status=${currentStatus}), skipping duplicate event`
+    );
+    return new NextResponse(null, { status: 200 });
+  }
+
+  // 7. Extract disconnection_reason from payload (for call_ended events)
+  const disconnectionReason = call.disconnection_reason;
+  const hasTranscript = !!(call.transcript || call.transcript_object);
+
+  // Check if this is a "no human reached" scenario
+  const isNoHumanReached =
+    event === "call_ended" &&
+    disconnectionReason &&
+    NO_HUMAN_REACHED_REASONS.has(disconnectionReason);
+
+  // Log disconnection reason for debugging
+  if (event === "call_ended" && disconnectionReason) {
+    console.log(
+      `[Retell Webhook] Call ${callId} ended with disconnection_reason: ${disconnectionReason}`
+    );
   }
 
   // 8. Prepare updates for calls table
@@ -123,21 +149,52 @@ export async function POST(request: NextRequest) {
     updated_at: new Date().toISOString(),
   };
 
-  if (newStatus && canProgressStatus(currentStatus, newStatus)) {
-    callUpdates.status = newStatus;
-  }
+  // 9. Handle different scenarios
+  if (isNoHumanReached) {
+    // No human was reached (voicemail, no answer, busy, dial failed)
+    // Mark as failed and skip extraction
+    callUpdates.status = "failed";
+    callUpdates.is_extracting = false;
+    callUpdates.failure_reason =
+      disconnectionReason === "dial_failed"
+        ? "Call failed"
+        : "Your phone call was not answered";
+    callUpdates.failure_details = disconnectionReason;
 
-  // 9. Handle is_extracting behavior on call_ended or call_analyzed
-  const hasTranscript = !!(call.transcript || call.transcript_object);
+    console.log(
+      `[Retell Webhook] Call ${callId} marked as failed: no human reached (${disconnectionReason})`
+    );
+  } else {
+    // Normal status progression
+    let newStatus: string | null = null;
 
-  if (event === "call_ended" || event === "call_analyzed") {
-    if (hasTranscript) {
-      // Set is_extracting=true to signal that extraction should happen
-      callUpdates.is_extracting = true;
-    } else {
-      // No transcript available - mark as not extracting with failure reason
-      callUpdates.is_extracting = false;
-      callUpdates.failure_reason = "transcript_missing";
+    switch (event) {
+      case "call_started":
+        newStatus = "calling";
+        break;
+      case "call_ended":
+      case "call_analyzed":
+        newStatus = "completed";
+        break;
+      default:
+        // Unknown event - just log and acknowledge
+        console.log(`[Retell Webhook] Unknown event: ${event}`);
+    }
+
+    if (newStatus && canProgressStatus(currentStatus, newStatus)) {
+      callUpdates.status = newStatus;
+    }
+
+    // Handle is_extracting behavior on call_ended or call_analyzed
+    if (event === "call_ended" || event === "call_analyzed") {
+      if (hasTranscript) {
+        // Set is_extracting=true to signal that extraction should happen
+        callUpdates.is_extracting = true;
+      } else {
+        // No transcript available - mark as not extracting with failure reason
+        callUpdates.is_extracting = false;
+        callUpdates.failure_reason = "transcript_missing";
+      }
     }
   }
 
@@ -156,6 +213,7 @@ export async function POST(request: NextRequest) {
   }
 
   // 11. Store artifacts (upsert into call_artifacts)
+  // Always store the raw payload; optionally store transcript for debugging even on failed calls
   const artifactData: Record<string, unknown> = {
     call_id: callId,
     raw_provider_payload_json: payload,
@@ -183,9 +241,14 @@ export async function POST(request: NextRequest) {
   }
 
   // 12. Run extraction on call_analyzed (preferred) or call_ended if transcript exists
-  // Prefer call_analyzed as it has more complete data
-  // Extraction runs asynchronously but we await to ensure it completes before responding
-  if (event === "call_analyzed" && hasTranscript) {
+  // IMPORTANT: Skip extraction for "no human reached" scenarios
+  if (isNoHumanReached) {
+    console.log(
+      `[Retell Webhook] Skipping extraction for call ${callId} (no human reached)`
+    );
+  } else if (event === "call_analyzed" && hasTranscript) {
+    // Prefer call_analyzed as it has more complete data
+    // Extraction runs asynchronously but we await to ensure it completes before responding
     console.log(`[Retell Webhook] Running extraction for call ${callId} (call_analyzed)`);
     try {
       await extractAnswers(
