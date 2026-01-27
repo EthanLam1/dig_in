@@ -42,6 +42,8 @@ Only two routes:
 **Always required inputs:**
 
 - `restaurant_phone_e164` (E.164 only, e.g. `+14165551234`)
+
+- UI may collect phone number as {country_code} + {national_number} and MUST compose E.164 (+<country_code><digits>) before sending restaurant_phone_e164 / reservation_phone_e164 to the API.
     
 - `call_intent` (`make_reservation` | `questions_only`)
     
@@ -73,6 +75,8 @@ Extra questions:
     - `dietary_options` (requires `restriction` if enabled)
     
       - When `dietary_options` is enabled, show a toggle: “Still reserve if they can’t accommodate” → maps to dietary_options.proceed_if_unavailable (default true).
+      
+      - **Note:** `proceed_if_unavailable` is only relevant when `call_intent='make_reservation'`. When `call_intent='questions_only'`, this toggle should be disabled (grayed out) in the UI and cannot be changed. It does not affect `questions_to_ask` in questions_only mode.
         
     - `hours_today`
         
@@ -750,6 +754,8 @@ Environment variables:
   - Include only enabled preset questions and custom questions, one per line.
 
 - The agent MUST ask one at a time, skip irrelevant steps when earlier answers make later steps impossible (e.g., do not attempt booking if they do not take reservations), and end politely.
+
+- **Callback phone formatting for TTS:** The callback phone line should be spoken in a grouped format with slight pauses (e.g., "416  555  1234"), omitting "+" and omitting the country code for +1 (US/Canada) numbers. For other international numbers, remove "+" and group digits with spaces. This ensures natural speech cadence without the agent saying "plus one" or rushing through the digits.
 
 
 ## 10) Extensibility for Nice-to-Haves

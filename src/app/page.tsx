@@ -44,6 +44,57 @@ interface PresetState {
   hours_today: boolean;
 }
 
+// Common country codes for the dropdown
+const COUNTRY_CODES = [
+  { value: "+1", label: "+1 (US/CA)" },
+  { value: "+44", label: "+44 (UK)" },
+  { value: "+61", label: "+61 (AU)" },
+  { value: "+33", label: "+33 (FR)" },
+  { value: "+49", label: "+49 (DE)" },
+  { value: "+81", label: "+81 (JP)" },
+  { value: "+86", label: "+86 (CN)" },
+  { value: "+91", label: "+91 (IN)" },
+  { value: "+52", label: "+52 (MX)" },
+];
+
+// Strip all non-digits from a string
+function normalizeToDigits(input: string): string {
+  return input.replace(/\D/g, "");
+}
+
+// Compose E.164 from country code and national number
+function composeE164(countryCode: string, nationalNumber: string): string {
+  const digits = normalizeToDigits(nationalNumber);
+  return `${countryCode}${digits}`;
+}
+
+// Validate phone number length for a given country code
+function getPhoneValidationError(countryCode: string, nationalNumber: string): string | null {
+  const digits = normalizeToDigits(nationalNumber);
+  if (!digits) return null; // Don't show error for empty input
+  
+  // Validation rules by country code
+  if (countryCode === "+1") {
+    if (digits.length !== 10) {
+      return `US/CA numbers must be 10 digits (currently ${digits.length})`;
+    }
+  }
+  // Add more country-specific validation as needed
+  return null;
+}
+
+// Check if phone is valid for form submission
+function isPhoneValid(countryCode: string, nationalNumber: string): boolean {
+  const digits = normalizeToDigits(nationalNumber);
+  if (!digits) return false;
+  
+  if (countryCode === "+1") {
+    return digits.length === 10;
+  }
+  // For other countries, just require some digits (server validates)
+  return digits.length >= 5;
+}
+
 // Generate time options in 15-minute increments
 function generateTimeOptions(): { value: string; label: string }[] {
   const options: { value: string; label: string }[] = [];
@@ -69,7 +120,8 @@ export default function Home() {
 
   // Form state
   const [restaurantName, setRestaurantName] = useState("");
-  const [restaurantPhone, setRestaurantPhone] = useState("");
+  const [restaurantCountryCode, setRestaurantCountryCode] = useState("+1");
+  const [restaurantNationalNumber, setRestaurantNationalNumber] = useState("");
   const [callIntent, setCallIntent] = useState<"make_reservation" | "questions_only">("make_reservation");
   const [presets, setPresets] = useState<PresetState>({
     takes_reservations: false,
@@ -83,7 +135,8 @@ export default function Home() {
   const [reservationTime, setReservationTime] = useState("19:00"); // Default to 7:00 PM
   const [reservationPartySize, setReservationPartySize] = useState(2);
   const [reservationName, setReservationName] = useState("");
-  const [reservationPhone, setReservationPhone] = useState("");
+  const [reservationCountryCode, setReservationCountryCode] = useState("+1");
+  const [reservationNationalNumber, setReservationNationalNumber] = useState("");
   const [customQuestions, setCustomQuestions] = useState<string[]>([""]);
   const [error, setError] = useState<string | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
@@ -93,7 +146,25 @@ export default function Home() {
     const name = searchParams.get("restaurant_name");
     const phone = searchParams.get("restaurant_phone_e164");
     if (name) setRestaurantName(name);
-    if (phone) setRestaurantPhone(phone);
+    if (phone) {
+      // Parse E.164 back to country code + national number
+      // Try to match known country codes (longest first)
+      const sortedCodes = [...COUNTRY_CODES].sort((a, b) => b.value.length - a.value.length);
+      let matched = false;
+      for (const code of sortedCodes) {
+        if (phone.startsWith(code.value)) {
+          setRestaurantCountryCode(code.value);
+          setRestaurantNationalNumber(phone.slice(code.value.length));
+          matched = true;
+          break;
+        }
+      }
+      if (!matched && phone.startsWith("+")) {
+        // Default to +1 and put the rest as national number
+        setRestaurantCountryCode("+1");
+        setRestaurantNationalNumber(phone.slice(1));
+      }
+    }
   }, [searchParams]);
 
   // Get user timezone
@@ -194,16 +265,13 @@ export default function Home() {
   const handleSubmit = async () => {
     setError(null);
 
-    // Basic client-side validation - restaurant phone
-    if (!restaurantPhone.trim()) {
-      setError("Restaurant phone number is required.");
-      return;
-    }
+    // Compose E.164 phone numbers
+    const restaurantPhoneE164 = composeE164(restaurantCountryCode, restaurantNationalNumber);
+    const reservationPhoneE164 = composeE164(reservationCountryCode, reservationNationalNumber);
 
-    if (!/^\+\d+$/.test(restaurantPhone.trim())) {
-      setError(
-        "Restaurant phone must be in E.164 format (e.g., +14165551234)."
-      );
+    // Basic client-side validation - restaurant phone
+    if (!isPhoneValid(restaurantCountryCode, restaurantNationalNumber)) {
+      setError("Please enter a valid restaurant phone number.");
       return;
     }
 
@@ -229,15 +297,8 @@ export default function Home() {
         return;
       }
 
-      if (!reservationPhone.trim()) {
-        setError("Callback phone number is required.");
-        return;
-      }
-
-      if (!/^\+\d+$/.test(reservationPhone.trim())) {
-        setError(
-          "Callback phone must be in E.164 format (e.g., +14165551234)."
-        );
+      if (!isPhoneValid(reservationCountryCode, reservationNationalNumber)) {
+        setError("Please enter a valid callback phone number.");
         return;
       }
     }
@@ -267,7 +328,7 @@ export default function Home() {
     // Build request body conditionally based on call intent
     const requestBody: Record<string, unknown> = {
       restaurant_name: restaurantName.trim() || undefined,
-      restaurant_phone_e164: restaurantPhone.trim(),
+      restaurant_phone_e164: restaurantPhoneE164,
       call_intent: callIntent,
       questions,
     };
@@ -275,7 +336,7 @@ export default function Home() {
     // Only include reservation fields when booking
     if (callIntent === "make_reservation") {
       requestBody.reservation_name = reservationName.trim();
-      requestBody.reservation_phone_e164 = reservationPhone.trim();
+      requestBody.reservation_phone_e164 = reservationPhoneE164;
       requestBody.reservation_datetime_local_iso = buildDatetimeLocalIso(reservationDate!, reservationTime);
       requestBody.reservation_timezone = userTimezone;
       requestBody.reservation_party_size = reservationPartySize;
@@ -304,16 +365,20 @@ export default function Home() {
     }
   };
 
+  // Validation errors for inline display
+  const restaurantPhoneError = getPhoneValidationError(restaurantCountryCode, restaurantNationalNumber);
+  const reservationPhoneError = getPhoneValidationError(reservationCountryCode, reservationNationalNumber);
+
   // Form is valid when restaurant phone is provided, plus reservation fields when booking
   const isFormValid = 
-    restaurantPhone.trim() !== "" &&
+    isPhoneValid(restaurantCountryCode, restaurantNationalNumber) &&
     (callIntent === "questions_only" || (
       reservationDate !== undefined &&
       reservationTime !== "" &&
       reservationPartySize >= 1 &&
       reservationPartySize <= 20 &&
       reservationName.trim() !== "" &&
-      reservationPhone.trim() !== ""
+      isPhoneValid(reservationCountryCode, reservationNationalNumber)
     ));
 
   return (
@@ -425,18 +490,36 @@ export default function Home() {
                     >
                       Phone Number <span className="text-destructive">*</span>
                     </label>
-                    <Input
-                      id="restaurant-phone"
-                      type="tel"
-                      placeholder="+14165551234"
-                      value={restaurantPhone}
-                      onChange={(e) => setRestaurantPhone(e.target.value)}
-                      className="focus-visible:ring-primary"
-                    />
-                    <div className="mt-1.5 flex items-start gap-1.5 text-xs text-muted-foreground">
-                      <HelpCircle className="size-3.5 mt-0.5 shrink-0" />
-                      <span>Use + and country code (e.g., +14165551234)</span>
+                    <div className="flex gap-2">
+                      <Select
+                        value={restaurantCountryCode}
+                        onValueChange={setRestaurantCountryCode}
+                      >
+                        <SelectTrigger className="w-[130px] shrink-0">
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          {COUNTRY_CODES.map((code) => (
+                            <SelectItem key={code.value} value={code.value}>
+                              {code.label}
+                            </SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                      <Input
+                        id="restaurant-phone"
+                        type="tel"
+                        placeholder="(416) 555-1234"
+                        value={restaurantNationalNumber}
+                        onChange={(e) => setRestaurantNationalNumber(e.target.value)}
+                        className="focus-visible:ring-primary flex-1"
+                      />
                     </div>
+                    {restaurantPhoneError && (
+                      <p className="mt-1.5 text-xs text-destructive">
+                        {restaurantPhoneError}
+                      </p>
+                    )}
                   </div>
                 </div>
               </CardContent>
@@ -591,14 +674,36 @@ export default function Home() {
                     >
                       Callback Phone <span className="text-destructive">*</span>
                     </label>
-                    <Input
-                      id="callback-phone"
-                      type="tel"
-                      placeholder="+14165550000"
-                      value={reservationPhone}
-                      onChange={(e) => setReservationPhone(e.target.value)}
-                      className="focus-visible:ring-primary"
-                    />
+                    <div className="flex gap-2">
+                      <Select
+                        value={reservationCountryCode}
+                        onValueChange={setReservationCountryCode}
+                      >
+                        <SelectTrigger className="w-[130px] shrink-0">
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          {COUNTRY_CODES.map((code) => (
+                            <SelectItem key={code.value} value={code.value}>
+                              {code.label}
+                            </SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                      <Input
+                        id="callback-phone"
+                        type="tel"
+                        placeholder="(416) 555-0000"
+                        value={reservationNationalNumber}
+                        onChange={(e) => setReservationNationalNumber(e.target.value)}
+                        className="focus-visible:ring-primary flex-1"
+                      />
+                    </div>
+                    {reservationPhoneError && (
+                      <p className="mt-1.5 text-xs text-destructive">
+                        {reservationPhoneError}
+                      </p>
+                    )}
                     <div className="mt-1.5 flex items-start gap-1.5 text-xs text-muted-foreground">
                       <HelpCircle className="size-3.5 mt-0.5 shrink-0" />
                       <span>Your phone for the restaurant to confirm</span>
@@ -712,16 +817,28 @@ export default function Home() {
                       }
                       className="focus-visible:ring-primary"
                     />
-                    <div className="flex items-center justify-between mt-3 pt-3 border-t border-border">
-                      <label
-                        htmlFor="proceed-if-unavailable"
-                        className="text-sm text-muted-foreground cursor-pointer"
-                      >
-                        Still reserve if they can&apos;t accommodate
-                      </label>
+                    <div className={`flex items-center justify-between mt-3 pt-3 border-t border-border ${
+                      callIntent === "questions_only" ? "opacity-50" : ""
+                    }`}>
+                      <div className="flex flex-col">
+                        <label
+                          htmlFor="proceed-if-unavailable"
+                          className={`text-sm text-muted-foreground ${
+                            callIntent === "questions_only" ? "cursor-not-allowed" : "cursor-pointer"
+                          }`}
+                        >
+                          Still reserve if they can&apos;t accommodate
+                        </label>
+                        {callIntent === "questions_only" && (
+                          <span className="text-xs text-muted-foreground/70 mt-0.5">
+                            Only applies when booking a reservation.
+                          </span>
+                        )}
+                      </div>
                       <Switch
                         id="proceed-if-unavailable"
                         checked={presets.dietary_options.proceed_if_unavailable}
+                        disabled={callIntent === "questions_only"}
                         onCheckedChange={(checked) =>
                           setPresets({
                             ...presets,
@@ -809,12 +926,12 @@ export default function Home() {
               <CallPlanCard
                 callIntent={callIntent}
                 restaurantName={restaurantName}
-                restaurantPhone={restaurantPhone}
+                restaurantPhone={composeE164(restaurantCountryCode, restaurantNationalNumber)}
                 reservationDate={reservationDate}
                 reservationTime={reservationTime}
                 reservationPartySize={reservationPartySize}
                 reservationName={reservationName}
-                reservationPhone={reservationPhone}
+                reservationPhone={composeE164(reservationCountryCode, reservationNationalNumber)}
                 totalQuestions={totalQuestions}
                 liveQuestions={liveQuestions}
               />
@@ -827,12 +944,12 @@ export default function Home() {
           <CallPlanCard
             callIntent={callIntent}
             restaurantName={restaurantName}
-            restaurantPhone={restaurantPhone}
+            restaurantPhone={composeE164(restaurantCountryCode, restaurantNationalNumber)}
             reservationDate={reservationDate}
             reservationTime={reservationTime}
             reservationPartySize={reservationPartySize}
             reservationName={reservationName}
-            reservationPhone={reservationPhone}
+            reservationPhone={composeE164(reservationCountryCode, reservationNationalNumber)}
             totalQuestions={totalQuestions}
             liveQuestions={liveQuestions}
           />

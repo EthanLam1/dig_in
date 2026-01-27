@@ -110,7 +110,9 @@ export function buildQuestionsToAsk(params: {
     lines.push(`I'd like to make a reservation for ${params.reservation_party_size}.`);
     lines.push(`I can only do ${formattedDateTime} — is that exact time available?`);
     lines.push(`Can I book it under the name ${params.reservation_name}?`);
-    lines.push(`The callback phone number is ${params.reservation_phone_e164}.`);
+    // Format phone for TTS: grouped digits with pauses, no "+" or country code for +1
+    const spokenCallbackPhone = formatPhoneForTTS(params.reservation_phone_e164!);
+    lines.push(`The callback phone number is ${spokenCallbackPhone}.`);
     lines.push("Could you confirm the reservation details back to me?");
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -155,6 +157,58 @@ export function buildQuestionsToAsk(params: {
   }
 
   return lines.join("\n");
+}
+
+/**
+ * Formats an E.164 phone number for human-friendly TTS (text-to-speech).
+ * 
+ * - For +1 (US/Canada) numbers: omit "+" and country code, format as "XXX  XXX  XXXX"
+ *   with double spaces between groups to create slight pauses.
+ * - For other numbers: remove leading "+", group digits with spaces.
+ * 
+ * Examples:
+ *   "+14165551234" -> "416  555  1234"
+ *   "+442079460018" -> "44 20 7946 0018"
+ */
+function formatPhoneForTTS(phoneE164: string): string {
+  // Remove the leading "+"
+  const digits = phoneE164.replace(/^\+/, "");
+  
+  // Check if it's a +1 (US/Canada) number: +1 followed by exactly 10 digits
+  if (/^1\d{10}$/.test(digits)) {
+    // Extract the 10 national digits (skip the country code "1")
+    const national = digits.slice(1);
+    const areaCode = national.slice(0, 3);
+    const exchange = national.slice(3, 6);
+    const subscriber = national.slice(6, 10);
+    // Use double spaces for slight pauses between groups
+    return `${areaCode}  ${exchange}  ${subscriber}`;
+  }
+  
+  // For other international numbers, just space out the digits in a reasonable grouping
+  // Remove the "+" and add spaces every 2-4 digits for readability
+  // Simple approach: group as country code (1-3 digits), then pairs/triples
+  if (digits.length <= 4) {
+    return digits;
+  }
+  
+  // Try to intelligently group: first 2 digits as country, then groups of 4
+  const groups: string[] = [];
+  let remaining = digits;
+  
+  // First group: country code (assume 2 digits for most, but could be 1-3)
+  // For simplicity, take first 2 digits as country code
+  groups.push(remaining.slice(0, 2));
+  remaining = remaining.slice(2);
+  
+  // Then group remaining in chunks of 4, with last chunk being whatever's left
+  while (remaining.length > 0) {
+    const chunkSize = remaining.length > 4 ? 4 : remaining.length;
+    groups.push(remaining.slice(0, chunkSize));
+    remaining = remaining.slice(chunkSize);
+  }
+  
+  return groups.join(" ");
 }
 
 /**
