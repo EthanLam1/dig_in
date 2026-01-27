@@ -391,25 +391,37 @@ export default function CallsClient() {
     return () => listEl.removeEventListener("scroll", handleScroll);
   }, [loadMoreCalls]);
 
-  // Download transcript
+  // Helper to format transcript_json as text, filtering out empty lines
+  const formatTranscriptJson = (entries: TranscriptEntry[]): string => {
+    return entries
+      .map((entry) => {
+        const text = entry.text?.trim() || "";
+        // Skip entries with no actual text content
+        if (!text) return null;
+        const timestamp = entry.timestamp || "";
+        const speaker = entry.speaker || "Unknown";
+        return `[${timestamp}] ${speaker}: ${text}`;
+      })
+      .filter((line): line is string => line !== null)
+      .join("\n");
+  };
+
+  // Download transcript - prefer transcript_text, fall back to transcript_json
   const downloadTranscript = () => {
     if (!callDetail) return;
 
     let content = "";
+    const transcriptText = callDetail.artifacts.transcript_text?.trim() ?? "";
 
-    if (callDetail.artifacts.transcript_json && callDetail.artifacts.transcript_json.length > 0) {
-      // Format with timestamps and speaker labels
-      content = callDetail.artifacts.transcript_json
-        .map((entry) => {
-          const timestamp = entry.timestamp || "";
-          const speaker = entry.speaker || "Unknown";
-          const text = entry.text || "";
-          return `[${timestamp}] ${speaker}: ${text}`;
-        })
-        .join("\n");
-    } else if (callDetail.artifacts.transcript_text) {
-      content = callDetail.artifacts.transcript_text;
-    } else {
+    if (transcriptText.length > 0) {
+      // Prefer transcript_text when available
+      content = transcriptText;
+    } else if (callDetail.artifacts.transcript_json && callDetail.artifacts.transcript_json.length > 0) {
+      // Fall back to formatted transcript_json
+      content = formatTranscriptJson(callDetail.artifacts.transcript_json);
+    }
+
+    if (!content) {
       content = "No transcript available.";
     }
 
@@ -424,22 +436,24 @@ export default function CallsClient() {
     URL.revokeObjectURL(url);
   };
 
-  // Get transcript display text
+  // Get transcript display text - prefer transcript_text, fall back to transcript_json
   const getTranscriptText = (): string => {
     if (!callDetail) return "";
 
-    if (callDetail.artifacts.transcript_json && callDetail.artifacts.transcript_json.length > 0) {
-      return callDetail.artifacts.transcript_json
-        .map((entry) => {
-          const timestamp = entry.timestamp || "";
-          const speaker = entry.speaker || "Unknown";
-          const text = entry.text || "";
-          return `[${timestamp}] ${speaker}: ${text}`;
-        })
-        .join("\n");
+    const transcriptText = callDetail.artifacts.transcript_text?.trim() ?? "";
+
+    if (transcriptText.length > 0) {
+      // Prefer transcript_text when available
+      return transcriptText;
     }
 
-    return callDetail.artifacts.transcript_text || "No transcript available.";
+    if (callDetail.artifacts.transcript_json && callDetail.artifacts.transcript_json.length > 0) {
+      // Fall back to formatted transcript_json (filters out empty lines)
+      const formatted = formatTranscriptJson(callDetail.artifacts.transcript_json);
+      if (formatted) return formatted;
+    }
+
+    return "No transcript available.";
   };
 
   // Handle retry call
