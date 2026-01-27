@@ -397,7 +397,7 @@ export default function CallsClient() {
 
     let content = "";
 
-    if (callDetail.artifacts.transcript_json) {
+    if (callDetail.artifacts.transcript_json && callDetail.artifacts.transcript_json.length > 0) {
       // Format with timestamps and speaker labels
       content = callDetail.artifacts.transcript_json
         .map((entry) => {
@@ -428,7 +428,7 @@ export default function CallsClient() {
   const getTranscriptText = (): string => {
     if (!callDetail) return "";
 
-    if (callDetail.artifacts.transcript_json) {
+    if (callDetail.artifacts.transcript_json && callDetail.artifacts.transcript_json.length > 0) {
       return callDetail.artifacts.transcript_json
         .map((entry) => {
           const timestamp = entry.timestamp || "";
