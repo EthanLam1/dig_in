@@ -631,9 +631,11 @@ Purpose:
 
 Security (MVP):
 
-- Require header: `x-dig-in-webhook-secret: <RETELL_WEBHOOK_SECRET>`
+- Verify Retell webhooks using header `x-retell-signature` and `Retell.verify(rawBody, RETELL_WEBHOOK_API_KEY, signature)` from retell-sdk.
     
-- Reject if missing/invalid.
+- If `RETELL_WEBHOOK_API_KEY` is not set, fall back to `RETELL_API_KEY` but log a warning.
+    
+- Reject with 401 if signature is missing or invalid.
     
 
 Event behavior (MVP mapping):
@@ -688,7 +690,7 @@ Environment variables:
     
 - `RETELL_AGENT_ID`
     
-- `RETELL_WEBHOOK_SECRET`
+- `RETELL_WEBHOOK_API_KEY` (optional; falls back to `RETELL_API_KEY` if not set)
     
 - `OPENAI_API_KEY`
     
@@ -781,8 +783,8 @@ The MVP is designed so these are additive changes:
   - During migration period, reads may be `(user_id == authed_user) OR (session_id == current_session)`.
 
 - **Webhook security hardening:**
-  - MVP uses `x-dig-in-webhook-secret`.
-  - Future improvement: replace or augment with Retell’s official signature verification without changing endpoint paths or payload storage.
+  - MVP uses Retell's official `x-retell-signature` header verification via retell-sdk.
+  - Future improvement: additional rate limiting or IP allowlisting without changing endpoint paths or payload storage.
 
 
 ## 11) Cursor Rules (critical)

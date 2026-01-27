@@ -315,7 +315,7 @@ This contains optional “extra questions” beyond the reservation booking. Exa
 
 - Keep provider keys server-side only.
     
-- Verify webhook signatures if supported; otherwise require a shared secret header and validate payload shape.
+- Verify Retell webhooks using `x-retell-signature` header + webhook API key (via retell-sdk).
     
 - Store raw provider payloads only in DB (not returned to client).
 
