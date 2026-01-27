@@ -458,10 +458,10 @@ export default function HomeClient() {
   const isFormValid = disabledReasons.length === 0;
 
   return (
-    <div className="min-h-screen bg-gradient-to-b from-background via-background to-emerald-50/30">
+    <>
       <EmojiBackground />
-      {/* Main content wrapper - positioned above emoji background */}
-      <div className="relative z-10">
+      {/* Main content wrapper - positioned above emoji background (z-10 > z-0) */}
+      <div className="min-h-screen relative z-10">
       {/* Header */}
       <header className="pt-12 pb-8">
         <div className="container mx-auto max-w-6xl px-4">
@@ -1142,8 +1142,8 @@ export default function HomeClient() {
           </div>
         </div>
       </div>
-      </div>{/* End of z-10 content wrapper */}
-    </div>
+      </div>
+    </>
   );
 }
 

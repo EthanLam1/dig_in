@@ -50,6 +50,8 @@ If the user chooses ‘Questions only’, these fields are hidden/optional and n
 - Preset extra questions (toggles + inputs):
   1. “What’s the wait time right now?”
   2. “Do you have __ options?” (dietary restriction input)
+     - If enabled and call_intent='make_reservation', also show: “Still reserve if they can’t accommodate” → `dietary_options.proceed_if_unavailable` (default true).
+     - If call_intent='questions_only', this toggle is disabled/greyed out and does not affect questions-only calls.
   3. “What are your hours today?”
   4. “Do you take reservations?” (still useful if booking fails / clarifies policy)
 - Custom questions:
@@ -249,7 +251,7 @@ This contains optional “extra questions” beyond the reservation booking. Exa
   "presets": {
     "takes_reservations": { "enabled": true },
     "wait_time_now": { "enabled": true },
-    "dietary_options": { "enabled": true, "restriction": "vegan" },
+    "dietary_options": { "enabled": true, "restriction": "vegan", "proceed_if_unavailable": true },
     "hours_today": { "enabled": false }
   },
   "custom_questions": [

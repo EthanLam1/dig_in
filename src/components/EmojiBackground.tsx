@@ -124,10 +124,10 @@ export function EmojiBackground() {
         }
       `}</style>
 
-      {/* Fixed background container - z-index -10 ensures it's behind all content */}
+      {/* Fixed background container - z-0 with gradient, content should use z-10+ */}
       <div
-        className="fixed inset-0 overflow-hidden pointer-events-none select-none"
-        style={{ zIndex: -10 }}
+        className="fixed inset-0 w-screen h-screen overflow-hidden pointer-events-none select-none bg-gradient-to-b from-background via-background to-emerald-50/30"
+        style={{ zIndex: 0 }}
         aria-hidden="true"
       >
         {/* Desktop emojis (hidden on small screens) */}

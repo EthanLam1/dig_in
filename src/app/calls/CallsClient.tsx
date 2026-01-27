@@ -170,6 +170,35 @@ function formatDate(dateString: string): string {
   return date.toLocaleString();
 }
 
+// Helper to merge updated call data into the calls list (immutable update)
+function mergeCallSummary(
+  calls: CallListItem[],
+  updatedCall: CallDetail
+): CallListItem[] {
+  const index = calls.findIndex((c) => c.id === updatedCall.id);
+  
+  const updatedSummary: CallListItem = {
+    id: updatedCall.id,
+    restaurant_name: updatedCall.restaurant_name,
+    restaurant_phone_e164: updatedCall.restaurant_phone_e164,
+    call_intent: updatedCall.call_intent,
+    status: updatedCall.status,
+    is_extracting: updatedCall.is_extracting,
+    reservation_status: updatedCall.reservation_status,
+    created_at: calls[index]?.created_at || new Date().toISOString(),
+  };
+
+  if (index === -1) {
+    // Call not in list (edge case) - insert at top
+    return [updatedSummary, ...calls];
+  }
+
+  // Return new array with updated call
+  const newCalls = [...calls];
+  newCalls[index] = updatedSummary;
+  return newCalls;
+}
+
 export default function CallsClient() {
   const router = useRouter();
   const searchParams = useSearchParams();
@@ -249,7 +278,9 @@ export default function CallsClient() {
       }
 
       try {
-        const response = await fetch(`/api/calls/${callId}`);
+        const response = await fetch(`/api/calls/${callId}`, {
+          cache: "no-store",
+        });
         const data = await response.json();
         if (!response.ok) {
           if (isInitial) {
@@ -260,6 +291,8 @@ export default function CallsClient() {
           return null;
         }
         setCallDetail(data);
+        // Merge updated call data into the calls list so badges update immediately
+        setCalls((prev) => mergeCallSummary(prev, data as CallDetail));
         setRefreshError(null);
         return data as CallDetail;
       } catch {
