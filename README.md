@@ -18,7 +18,7 @@ Book restaurant reservations for the user via an AI phone agent:
 ---
 
 ## Non-goals (MVP)
-- Full Google Places / nearby search (future work)
+- Polished Google Places metadata (photos/ratings/reviews/open-now/distance). MVP Places is limited to autocomplete + “Near me” + phone autofill.
 - Real-time streaming transcripts (final transcript only)
 - Audio recording playback (transcript only)
 - Full user authentication (anonymous session history only)
@@ -39,7 +39,7 @@ Only two routes:
 
 **Reservation Inputs (required if “Book a reservation” is enabled)**
 If the user chooses ‘Questions only’, these fields are hidden/optional and not required.
-- Restaurant phone (**E.164 only**, e.g. `+14165551234`)
+- Restaurant phone (**E.164 only**, e.g. +14165551234) — can be entered manually or auto-filled via Google Places (Search / Near me).
 - Reservation date/time (next **3 days** for MVP; interpreted as **user local timezone** and clearly indicated in UI)
 - Party size (integer)
 - Reservation name
@@ -47,6 +47,7 @@ If the user chooses ‘Questions only’, these fields are hidden/optional and n
 
 **Optional extras**
 - Restaurant name (optional label for UI/history)
+- Restaurant search (Google Places, optional): typeahead autocomplete + “Near me” list. Selecting a place fetches details and auto-fills restaurant_name + restaurant_phone_e164. If phone is missing, user must enter phone manually.
 - Preset extra questions (toggles + inputs):
   1. “What’s the wait time right now?”
   2. “Do you have __ options?” (dietary restriction input)
@@ -129,6 +130,7 @@ On success, create the call and navigate to `/calls` with the newly created call
 3. **DB (Supabase Postgres)**
 4. **Retell** for outbound calling + webhook callbacks
 5. **OpenAI API** for transcript → structured extraction (`answers_json` + reservation result)
+6. **Google Places API** for restaurant search (Autocomplete + Nearby + Place Details for phone lookup)
 
 ### End-to-end flow
 1. User submits reservation + extra questions on `/`
@@ -239,6 +241,22 @@ New reservation result fields (P0):
   - updates reservation_status / reservation_result_json
   - sets `is_extracting=false`
 
+### `GET /api/places/autocomplete`
+- Server-side proxy for Google Places autocomplete
+- Query params: `input` (required), `sessionToken` (required)
+- Returns a small list of predictions: `place_id`, `primary_text`, `secondary_text`
+
+### `GET /api/places/nearby`
+- Server-side proxy for Google Places nearby search
+- Query params: `lat` (required), `lng` (required), `radiusMeters` (optional)
+- Returns a small list of nearby restaurants: `place_id`, `name`, `short_address`
+
+### `GET /api/places/details`
+- Server-side proxy for Google Place Details (used after selecting a place)
+- Query params: `placeId` (required), `sessionToken` (optional)
+- Returns: `restaurant_name`, `restaurant_phone_e164` (if available), and optional `address`
+- If phone is missing from Google, UI must fall back to manual phone entry
+
 ---
 
 ## JSON Contracts
@@ -322,13 +340,15 @@ This contains optional “extra questions” beyond the reservation booking. Exa
 - Store raw provider payloads only in DB (not returned to client).
 
 - Reservation name and callback phone are PII; avoid logging them.
+
+- Keep Google Places API key server-side only (call Places via our /api/places/* routes; never from the browser).
     
 
 ---
 
 ## Future Work
 
-- Replace manual entry with Google Places (nearby restaurant search + place metadata)
+- Enhance Google Places results: photos/ratings/open-now/distance + optionally store place metadata (place_id/address/lat/lng)
 
 - Allow flexible reservation windows (time range + best available)
 
@@ -343,6 +363,6 @@ This contains optional “extra questions” beyond the reservation booking. Exa
 
 This MVP is intentionally structured so future scope is additive:
 
-- **Nearby restaurants (Google Places):** the app’s “restaurant selection” currently produces `restaurant_name` + `restaurant_phone_e164`. A Places integration can simply populate these same fields and optionally add new nullable metadata fields (e.g., place_id/address/lat/lng) without changing the core call flow.
+- **Google Places restaurant selection (Autocomplete + Near me):** the app’s “restaurant selection” produces `restaurant_name` + `restaurant_phone_e164`. Places selection should populate the same fields; future optional metadata fields (place_id/address/lat/lng) can be added later without changing the core call flow.`
 - **Flexible reservation window:** reservation requests are stored in dedicated `reservation_*` fields, and outcomes are stored in `reservation_result_json`. Adding a time range later can be done by introducing optional window fields while keeping the same extraction + dashboard flow (the agent books the best available time and the chosen time is reflected in `reservation_result_json` and `answers_json.reservation`).
 - **Full auth:** the schema already includes `user_id` alongside `session_id`. Supabase Auth can be added by scoping reads to `user_id` and migrating existing session calls to a user upon login.

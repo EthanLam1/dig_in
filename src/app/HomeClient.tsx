@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useMemo } from "react";
+import { useState, useEffect, useMemo, useRef, useCallback } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { format } from "date-fns";
 import { Button } from "@/components/ui/button";
@@ -33,9 +33,40 @@ import {
   Circle,
   CalendarIcon,
   History,
+  Search,
+  MapPin,
+  X,
 } from "lucide-react";
 import Link from "next/link";
 import { EmojiBackground } from "@/components/EmojiBackground";
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Google Places Types
+// ─────────────────────────────────────────────────────────────────────────────
+
+interface PlaceAutocompleteItem {
+  place_id: string;
+  primary_text: string;
+  secondary_text: string;
+}
+
+interface PlaceNearbyItem {
+  place_id: string;
+  name: string;
+  short_address: string;
+}
+
+interface PlaceDetails {
+  place_id: string;
+  restaurant_name: string;
+  restaurant_phone_e164: string | null;
+  restaurant_address: string;
+}
+
+// Generate a random session token for Google Places billing optimization
+function generateSessionToken(): string {
+  return crypto.randomUUID();
+}
 
 interface PresetState {
   takes_reservations: boolean;
@@ -145,6 +176,21 @@ export default function HomeClient() {
   const [touched, setTouched] = useState<Record<string, boolean>>({});
   const [submitAttempted, setSubmitAttempted] = useState(false);
 
+  // Google Places state
+  const [placesSearch, setPlacesSearch] = useState("");
+  const [placesSessionToken, setPlacesSessionToken] = useState(() => generateSessionToken());
+  const [autocompleteResults, setAutocompleteResults] = useState<PlaceAutocompleteItem[]>([]);
+  const [nearbyResults, setNearbyResults] = useState<PlaceNearbyItem[]>([]);
+  const [isSearchingPlaces, setIsSearchingPlaces] = useState(false);
+  const [isLoadingNearby, setIsLoadingNearby] = useState(false);
+  const [isLoadingDetails, setIsLoadingDetails] = useState(false);
+  const [placesError, setPlacesError] = useState<string | null>(null);
+  const [showPlacesDropdown, setShowPlacesDropdown] = useState(false);
+  const [userLocation, setUserLocation] = useState<{ lat: number; lng: number } | null>(null);
+  const [phoneMissingMessage, setPhoneMissingMessage] = useState<string | null>(null);
+  const placesSearchRef = useRef<HTMLDivElement>(null);
+  const debounceTimerRef = useRef<NodeJS.Timeout | null>(null);
+
   // Helper to mark a field as touched
   const markTouched = (fieldName: string) => {
     setTouched((prev) => ({ ...prev, [fieldName]: true }));
@@ -183,6 +229,219 @@ export default function HomeClient() {
 
   // Get user timezone
   const userTimezone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // Google Places Functions
+  // ─────────────────────────────────────────────────────────────────────────
+
+  // Close dropdown when clicking outside
+  useEffect(() => {
+    function handleClickOutside(event: MouseEvent) {
+      if (placesSearchRef.current && !placesSearchRef.current.contains(event.target as Node)) {
+        setShowPlacesDropdown(false);
+      }
+    }
+    document.addEventListener("mousedown", handleClickOutside);
+    return () => document.removeEventListener("mousedown", handleClickOutside);
+  }, []);
+
+  // Autocomplete search with debounce
+  const searchAutocomplete = useCallback(async (input: string) => {
+    if (input.trim().length < 2) {
+      setAutocompleteResults([]);
+      return;
+    }
+
+    setIsSearchingPlaces(true);
+    setPlacesError(null);
+
+    try {
+      const params = new URLSearchParams({
+        input: input.trim(),
+        sessionToken: placesSessionToken,
+      });
+      if (userLocation) {
+        params.append("lat", userLocation.lat.toString());
+        params.append("lng", userLocation.lng.toString());
+      }
+
+      const response = await fetch(`/api/places/autocomplete?${params}`);
+      const data = await response.json();
+
+      if (!response.ok) {
+        setPlacesError("Google search is unavailable right now — enter restaurant manually.");
+        setAutocompleteResults([]);
+        return;
+      }
+
+      setAutocompleteResults(data.items || []);
+      setNearbyResults([]); // Clear nearby when doing autocomplete
+      setShowPlacesDropdown(true);
+    } catch {
+      setPlacesError("Google search is unavailable right now — enter restaurant manually.");
+      setAutocompleteResults([]);
+    } finally {
+      setIsSearchingPlaces(false);
+    }
+  }, [placesSessionToken, userLocation]);
+
+  // Handle search input change with debounce
+  const handlePlacesSearchChange = (value: string) => {
+    setPlacesSearch(value);
+    setPhoneMissingMessage(null);
+
+    // Clear existing debounce timer
+    if (debounceTimerRef.current) {
+      clearTimeout(debounceTimerRef.current);
+    }
+
+    // Set new debounce timer
+    debounceTimerRef.current = setTimeout(() => {
+      searchAutocomplete(value);
+    }, 300);
+  };
+
+  // Fetch place details and fill form
+  const selectPlace = async (placeId: string, placeName?: string) => {
+    setIsLoadingDetails(true);
+    setPlacesError(null);
+    setPhoneMissingMessage(null);
+
+    try {
+      const params = new URLSearchParams({ placeId });
+      const response = await fetch(`/api/places/details?${params}`);
+      const data: PlaceDetails = await response.json();
+
+      if (!response.ok) {
+        setPlacesError("Couldn't get restaurant details — enter manually.");
+        return;
+      }
+
+      // Fill restaurant name
+      setRestaurantName(data.restaurant_name || placeName || "");
+
+      // Fill phone if available
+      if (data.restaurant_phone_e164) {
+        // Parse E.164 back to country code + national number
+        const phone = data.restaurant_phone_e164;
+        const sortedCodes = [...COUNTRY_CODES].sort((a, b) => b.value.length - a.value.length);
+        let matched = false;
+        for (const code of sortedCodes) {
+          if (phone.startsWith(code.value)) {
+            setRestaurantCountryCode(code.value);
+            setRestaurantNationalNumber(phone.slice(code.value.length));
+            matched = true;
+            break;
+          }
+        }
+        if (!matched && phone.startsWith("+")) {
+          // Default to +1 and put the rest as national number
+          setRestaurantCountryCode("+1");
+          setRestaurantNationalNumber(phone.slice(2));
+        }
+      } else {
+        // Phone not available from Google
+        setPhoneMissingMessage(
+          "Google didn't provide a phone number for this place — please enter it manually."
+        );
+      }
+
+      // Reset session token after selection (per Google Places billing best practice)
+      setPlacesSessionToken(generateSessionToken());
+
+      // Clear search and results
+      setPlacesSearch("");
+      setAutocompleteResults([]);
+      setNearbyResults([]);
+      setShowPlacesDropdown(false);
+    } catch {
+      setPlacesError("Couldn't get restaurant details — enter manually.");
+    } finally {
+      setIsLoadingDetails(false);
+    }
+  };
+
+  // Nearby search
+  const searchNearby = async () => {
+    setIsLoadingNearby(true);
+    setPlacesError(null);
+    setPhoneMissingMessage(null);
+
+    // Request location if not already available
+    if (!userLocation) {
+      if (!navigator.geolocation) {
+        setPlacesError("Location is not supported by your browser — use search or enter manually.");
+        setIsLoadingNearby(false);
+        return;
+      }
+
+      try {
+        const position = await new Promise<GeolocationPosition>((resolve, reject) => {
+          navigator.geolocation.getCurrentPosition(resolve, reject, {
+            enableHighAccuracy: false,
+            timeout: 10000,
+            maximumAge: 300000, // Cache for 5 minutes
+          });
+        });
+
+        const { latitude, longitude } = position.coords;
+        setUserLocation({ lat: latitude, lng: longitude });
+
+        // Now fetch nearby
+        await fetchNearby(latitude, longitude);
+      } catch (err) {
+        const geoError = err as GeolocationPositionError;
+        if (geoError.code === geoError.PERMISSION_DENIED) {
+          setPlacesError("Location denied — use search or enter manually.");
+        } else {
+          setPlacesError("Couldn't get your location — use search or enter manually.");
+        }
+        setIsLoadingNearby(false);
+      }
+    } else {
+      await fetchNearby(userLocation.lat, userLocation.lng);
+    }
+  };
+
+  const fetchNearby = async (lat: number, lng: number) => {
+    try {
+      const params = new URLSearchParams({
+        lat: lat.toString(),
+        lng: lng.toString(),
+      });
+
+      const response = await fetch(`/api/places/nearby?${params}`);
+      const data = await response.json();
+
+      if (!response.ok) {
+        setPlacesError("Google search is unavailable right now — enter restaurant manually.");
+        setNearbyResults([]);
+        return;
+      }
+
+      setNearbyResults(data.items || []);
+      setAutocompleteResults([]); // Clear autocomplete when doing nearby
+      setShowPlacesDropdown(true);
+    } catch {
+      setPlacesError("Google search is unavailable right now — enter restaurant manually.");
+      setNearbyResults([]);
+    } finally {
+      setIsLoadingNearby(false);
+    }
+  };
+
+  // Clear places search
+  const clearPlacesSearch = () => {
+    setPlacesSearch("");
+    setAutocompleteResults([]);
+    setNearbyResults([]);
+    setShowPlacesDropdown(false);
+    setPlacesError(null);
+    setPhoneMissingMessage(null);
+    if (debounceTimerRef.current) {
+      clearTimeout(debounceTimerRef.current);
+    }
+  };
 
   // Calculate min/max date for reservation (today to today+3 days inclusive)
   const today = useMemo(() => {
@@ -542,6 +801,138 @@ export default function HomeClient() {
                   <h2 className="text-lg font-semibold">Restaurant</h2>
                 </div>
                 <div className="space-y-4">
+                  {/* Google Places Search Section */}
+                  <div ref={placesSearchRef} className="relative">
+                    <label className="mb-2 block text-sm font-medium">
+                      Find restaurant
+                      <span className="text-muted-foreground ml-1">(optional)</span>
+                    </label>
+                    <div className="flex gap-2">
+                      <div className="relative flex-1">
+                        <Search className="absolute left-3 top-1/2 -translate-y-1/2 size-4 text-muted-foreground" />
+                        <Input
+                          type="text"
+                          placeholder="Search by name..."
+                          value={placesSearch}
+                          onChange={(e) => handlePlacesSearchChange(e.target.value)}
+                          onFocus={() => {
+                            if (autocompleteResults.length > 0 || nearbyResults.length > 0) {
+                              setShowPlacesDropdown(true);
+                            }
+                          }}
+                          className="pl-9 pr-8 focus-visible:ring-primary"
+                          disabled={isLoadingDetails}
+                        />
+                        {placesSearch && (
+                          <button
+                            type="button"
+                            onClick={clearPlacesSearch}
+                            className="absolute right-2 top-1/2 -translate-y-1/2 p-1 text-muted-foreground hover:text-foreground"
+                          >
+                            <X className="size-4" />
+                          </button>
+                        )}
+                        {isSearchingPlaces && (
+                          <Loader2 className="absolute right-8 top-1/2 -translate-y-1/2 size-4 animate-spin text-muted-foreground" />
+                        )}
+                      </div>
+                      <Button
+                        type="button"
+                        variant="outline"
+                        onClick={searchNearby}
+                        disabled={isLoadingNearby || isLoadingDetails}
+                        className="shrink-0"
+                      >
+                        {isLoadingNearby ? (
+                          <Loader2 className="size-4 animate-spin" />
+                        ) : (
+                          <>
+                            <MapPin className="size-4 mr-1.5" />
+                            Near me
+                          </>
+                        )}
+                      </Button>
+                    </div>
+
+                    {/* Dropdown for autocomplete/nearby results */}
+                    {showPlacesDropdown && (autocompleteResults.length > 0 || nearbyResults.length > 0) && (
+                      <div className="absolute z-20 mt-1 w-full bg-background border border-border rounded-lg shadow-lg max-h-64 overflow-y-auto">
+                        {autocompleteResults.length > 0 && (
+                          <ul className="py-1">
+                            {autocompleteResults.map((item) => (
+                              <li key={item.place_id}>
+                                <button
+                                  type="button"
+                                  onClick={() => selectPlace(item.place_id, item.primary_text)}
+                                  className="w-full px-3 py-2 text-left hover:bg-muted transition-colors"
+                                  disabled={isLoadingDetails}
+                                >
+                                  <span className="font-medium">{item.primary_text}</span>
+                                  {item.secondary_text && (
+                                    <span className="text-sm text-muted-foreground ml-1">
+                                      {item.secondary_text}
+                                    </span>
+                                  )}
+                                </button>
+                              </li>
+                            ))}
+                          </ul>
+                        )}
+                        {nearbyResults.length > 0 && (
+                          <>
+                            <div className="px-3 py-1.5 text-xs font-medium text-muted-foreground bg-muted/50 border-b">
+                              Nearby restaurants
+                            </div>
+                            <ul className="py-1">
+                              {nearbyResults.map((item) => (
+                                <li key={item.place_id}>
+                                  <button
+                                    type="button"
+                                    onClick={() => selectPlace(item.place_id, item.name)}
+                                    className="w-full px-3 py-2 text-left hover:bg-muted transition-colors"
+                                    disabled={isLoadingDetails}
+                                  >
+                                    <span className="font-medium">{item.name}</span>
+                                    {item.short_address && (
+                                      <span className="text-sm text-muted-foreground ml-1">
+                                        {item.short_address}
+                                      </span>
+                                    )}
+                                  </button>
+                                </li>
+                              ))}
+                            </ul>
+                          </>
+                        )}
+                      </div>
+                    )}
+
+                    {/* Places error message */}
+                    {placesError && (
+                      <p className="mt-1.5 text-xs text-amber-600">
+                        {placesError}
+                      </p>
+                    )}
+
+                    {/* Loading details indicator */}
+                    {isLoadingDetails && (
+                      <p className="mt-1.5 text-xs text-muted-foreground flex items-center gap-1">
+                        <Loader2 className="size-3 animate-spin" />
+                        Getting restaurant details...
+                      </p>
+                    )}
+                  </div>
+
+                  {/* Separator */}
+                  <div className="relative">
+                    <div className="absolute inset-0 flex items-center">
+                      <div className="w-full border-t border-border" />
+                    </div>
+                    <div className="relative flex justify-center text-xs uppercase">
+                      <span className="bg-card px-2 text-muted-foreground">or enter manually</span>
+                    </div>
+                  </div>
+
                   <div>
                     <label
                       htmlFor="restaurant-name"
@@ -555,7 +946,10 @@ export default function HomeClient() {
                       type="text"
                       placeholder="e.g., Joe's Pizza"
                       value={restaurantName}
-                      onChange={(e) => setRestaurantName(e.target.value)}
+                      onChange={(e) => {
+                        setRestaurantName(e.target.value);
+                        setPhoneMissingMessage(null);
+                      }}
                       className="focus-visible:ring-primary"
                     />
                   </div>
@@ -603,6 +997,12 @@ export default function HomeClient() {
                     )}
                     {!normalizeToDigits(restaurantNationalNumber) && shouldShowError("restaurantPhone") && (
                       <p className="mt-1.5 text-xs text-destructive">Required</p>
+                    )}
+                    {/* Phone missing from Google Places message */}
+                    {phoneMissingMessage && (
+                      <p className="mt-1.5 text-xs text-amber-600">
+                        {phoneMissingMessage}
+                      </p>
                     )}
                   </div>
                 </div>

@@ -20,6 +20,8 @@ Dig In is a Next.js web app that books restaurant reservations via a voice agent
 - Voice provider: Retell (outbound calls + webhooks)
     
 - Extraction: OpenAI API (transcript → `answers_json` structured output)
+
+- Restaurant search: Google Places API (Autocomplete + Nearby + Place Details)
     
 - Deployment: Vercel
     
@@ -44,6 +46,8 @@ Only two routes:
 - `restaurant_phone_e164` (E.164 only, e.g. `+14165551234`)
 
 - UI may collect phone number as {country_code} + {national_number} and MUST compose E.164 (+<country_code><digits>) before sending restaurant_phone_e164 / reservation_phone_e164 to the API.
+
+- UI may optionally populate restaurant_name + restaurant_phone_e164 via Google Places (autocomplete or “near me”). Regardless of source, the API must receive restaurant_phone_e164 in E.164 format.
     
 - `call_intent` (`make_reservation` | `questions_only`)
     
@@ -673,6 +677,73 @@ Idempotency:
 - use provider_call_id + event type + timestamps as a guard (store raw payload and short-circuit if already processed)
     
 
+### 7.5 GET /api/places/autocomplete
+
+Purpose:
+- server-side proxy to Google Places Autocomplete
+- used by `/` restaurant search box
+
+Query params:
+- `input` (string, required)
+- `sessionToken` (string, required)
+- optional: `lat`, `lng` for location bias (if available)
+
+Response shape:
+{
+  "items": [
+    { "place_id": "string", "primary_text": "string", "secondary_text": "string" }
+  ]
+}
+
+Rules:
+- session_id cookie must exist (prevent open proxy abuse)
+- keep responses minimal (no photos/ratings in MVP)
+
+### 7.6 GET /api/places/nearby
+
+Purpose:
+- server-side proxy to Google Places Nearby Search
+- used by `/` “Near me” button
+
+Query params:
+- `lat` (number, required)
+- `lng` (number, required)
+- `radiusMeters` (number, optional; default ~1500)
+
+Response shape:
+{
+  "items": [
+    { "place_id": "string", "name": "string", "short_address": "string" }
+  ]
+}
+
+Rules:
+- session_id cookie must exist
+- keep responses minimal in MVP
+
+### 7.7 GET /api/places/details
+
+Purpose:
+- server-side proxy to Google Place Details
+- used after user selects a place from autocomplete/nearby
+- fetch phone number, normalize to E.164 for call creation
+
+Query params:
+- `placeId` (string, required)
+- `sessionToken` (string, optional)
+
+Response shape:
+{
+  "place_id": "string",
+  "restaurant_name": "string",
+  "restaurant_phone_e164": "string or null",
+  "restaurant_address": "string or null"
+}
+
+Rules:
+- session_id cookie must exist
+- if phone is missing from Google, return restaurant_phone_e164 = null and UI must require manual entry    
+
 ## 8) Session Handling
 
 - Middleware sets `session_id` cookie on first request
@@ -695,6 +766,8 @@ Environment variables:
 - `OPENAI_API_KEY`
     
 - `OPENAI_MODEL` (default `gpt-4o-mini`)
+
+- `GOOGLE_PLACES_API_KEY`
     
 
 **Always include:**
@@ -766,7 +839,7 @@ Environment variables:
 
 The MVP is designed so these are additive changes:
 
-- **Nearby restaurants (Google Places):**
+- **Google Places restaurant selection (Autocomplete + Near me):**
   - Keep restaurant selection normalized to the existing fields: `restaurant_name` + `restaurant_phone_e164`.
   - Future optional DB columns (nullable) may be added without breaking current flows:
     - `restaurant_place_id`, `restaurant_address`, `restaurant_lat`, `restaurant_lng`
@@ -793,7 +866,7 @@ The MVP is designed so these are additive changes:
 
 - Do NOT add new routes beyond `/` and `/calls`
     
-- Do NOT add new API endpoints beyond those listed
+- Do NOT add new API endpoints beyond those listed in section 7 (calls + retell webhook + places proxies)
     
 - Do NOT change DB table names
     
