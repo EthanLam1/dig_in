@@ -757,7 +757,7 @@ Environment variables:
 
 - The agent MUST ask one at a time, skip irrelevant steps when earlier answers make later steps impossible (e.g., do not attempt booking if they do not take reservations), and end politely.
 
-- **Callback phone formatting for TTS:** The callback phone line should be spoken in a grouped format with slight pauses (e.g., "416  555  1234"), omitting "+" and omitting the country code for +1 (US/Canada) numbers. For other international numbers, remove "+" and group digits with spaces. This ensures natural speech cadence without the agent saying "plus one" or rushing through the digits.
+- **Callback phone formatting for TTS:** Callback phone must be spoken digit-by-digit with pauses (e.g., "6 4 7, 5 5 5, 0 0 0 0") to prevent TTS reading chunks as "six hundred...". For +1 (US/Canada) numbers, omit "+" and country code, then space each digit with commas between groups (area code, prefix, line number). For other international numbers, remove "+" and speak digit-by-digit with commas every 3-4 digits.
 
 
 ## 10) Extensibility for Nice-to-Haves
