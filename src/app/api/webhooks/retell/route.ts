@@ -1,10 +1,11 @@
 // POST /api/webhooks/retell
 // Receives Retell webhook events, verifies signature, updates call status and stores transcripts.
-// Step 5 implementation - extraction (Step 6) is not run here.
+// Runs Step 6 extraction when transcript is ready.
 
 import { NextRequest, NextResponse } from "next/server";
 import Retell from "retell-sdk";
 import { getSupabaseAdmin } from "@/lib/supabaseAdmin";
+import { extractAnswers } from "@/lib/extractAnswers";
 
 // Status progression order (forward-only updates)
 const STATUS_ORDER = ["queued", "calling", "connected", "completed", "failed"];
@@ -181,6 +182,32 @@ export async function POST(request: NextRequest) {
     );
   }
 
-  // 12. Return quickly to acknowledge webhook
+  // 12. Run extraction on call_analyzed (preferred) or call_ended if transcript exists
+  // Prefer call_analyzed as it has more complete data
+  // Extraction runs asynchronously but we await to ensure it completes before responding
+  if (event === "call_analyzed" && hasTranscript) {
+    console.log(`[Retell Webhook] Running extraction for call ${callId} (call_analyzed)`);
+    try {
+      await extractAnswers(
+        callId,
+        call.transcript_object as Parameters<typeof extractAnswers>[1],
+        call.transcript ?? null
+      );
+    } catch (err) {
+      console.error(`[Retell Webhook] Extraction failed for ${callId}:`, err);
+      // Extraction failure is handled inside extractAnswers - no need to update here
+    }
+  } else if (event === "call_ended" && hasTranscript) {
+    // For call_ended, we set is_extracting=true above but don't run extraction yet
+    // We wait for call_analyzed which has more complete data
+    // However, if call_analyzed never comes (edge case), we'd need a background job
+    // For MVP, we'll also trigger extraction on call_ended as a fallback
+    // To avoid double extraction, only run if this is the final event we expect
+    // Since Retell typically sends call_analyzed after call_ended, we'll skip extraction here
+    // and rely on call_analyzed. The is_extracting=true flag signals UI to wait.
+    console.log(`[Retell Webhook] Waiting for call_analyzed for extraction (call ${callId})`);
+  }
+
+  // 13. Return quickly to acknowledge webhook
   return new NextResponse(null, { status: 204 });
 }
