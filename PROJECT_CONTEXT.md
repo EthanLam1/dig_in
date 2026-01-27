@@ -71,6 +71,8 @@ Extra questions:
     - `wait_time_now`
         
     - `dietary_options` (requires `restriction` if enabled)
+    
+      - When `dietary_options` is enabled, show a toggle: “Still reserve if they can’t accommodate” → maps to dietary_options.proceed_if_unavailable (default true).
         
     - `hours_today`
         
@@ -296,7 +298,7 @@ Example:
 
     "wait_time_now": { "enabled": true },
 
-    "dietary_options": { "enabled": true, "restriction": "vegan" },
+    "dietary_options": { "enabled": true, "restriction": "vegan", "proceed_if_unavailable": true },
 
     "hours_today": { "enabled": false },
 
@@ -325,6 +327,8 @@ Rules:
 - custom_questions <= 5
     
 - enabled preset count + custom_questions count <= 10
+
+- If dietary_options.enabled=true, proceed_if_unavailable defaults to true if missing.
     
 
 ### 6.2 Extraction output (`call_artifacts.answers_json`)
@@ -718,11 +722,34 @@ Environment variables:
 
 `questions_to_ask` rules:
 
-- If make_reservation, first line includes booking instruction.
+- `questions_to_ask` is a multi-line string (one question/instruction per line). The agent asks/handles each line one at a time.
 
-- If questions_only, do NOT include booking instruction.
+- If `call_intent='make_reservation'`, construct `questions_to_ask` in this order:
 
-- The agent MUST ask one at a time, attempt booking, confirm details, and end.
+  1) Gatekeepers BEFORE booking:
+     - If preset `takes_reservations.enabled=true`, include:
+       - “Do you take reservations?”
+     - If preset `dietary_options.enabled=true`, include:
+       - “Do you have {restriction} options?”
+       - “If yes, could you accommodate that for this reservation?”
+       - If `dietary_options.proceed_if_unavailable=false`, also include:
+         - “If you can’t accommodate that restriction, please let me know — in that case we won’t book the reservation.”
+
+  2) Booking sequence (always after gatekeepers):
+     - “I’d like to make a reservation for {party_size}.”
+     - “I can only do {formatted_datetime_local} — is that exact time available?”
+     - “Can I book it under the name {reservation_name}?”
+     - “The callback phone number is {reservation_phone_e164}.”
+     - “Could you confirm the reservation details back to me?”
+
+  3) Remaining questions AFTER booking:
+     - Append any other enabled preset questions (`wait_time_now`, `hours_today`) and all custom questions, one per line.
+
+- If `call_intent='questions_only'`:
+  - Do NOT include the booking sequence.
+  - Include only enabled preset questions and custom questions, one per line.
+
+- The agent MUST ask one at a time, skip irrelevant steps when earlier answers make later steps impossible (e.g., do not attempt booking if they do not take reservations), and end politely.
 
 
 ## 10) Extensibility for Nice-to-Haves

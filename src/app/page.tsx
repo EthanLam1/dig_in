@@ -40,7 +40,7 @@ import { EmojiBackground } from "@/components/EmojiBackground";
 interface PresetState {
   takes_reservations: boolean;
   wait_time_now: boolean;
-  dietary_options: { enabled: boolean; restriction: string };
+  dietary_options: { enabled: boolean; restriction: string; proceed_if_unavailable: boolean };
   hours_today: boolean;
 }
 
@@ -74,7 +74,7 @@ export default function Home() {
   const [presets, setPresets] = useState<PresetState>({
     takes_reservations: false,
     wait_time_now: false,
-    dietary_options: { enabled: false, restriction: "" },
+    dietary_options: { enabled: false, restriction: "", proceed_if_unavailable: true },
     hours_today: false,
   });
   
@@ -252,6 +252,9 @@ export default function Home() {
           ...(presets.dietary_options.enabled &&
           presets.dietary_options.restriction.trim()
             ? { restriction: presets.dietary_options.restriction.trim() }
+            : {}),
+          ...(presets.dietary_options.enabled
+            ? { proceed_if_unavailable: presets.dietary_options.proceed_if_unavailable }
             : {}),
         },
         hours_today: { enabled: presets.hours_today },
@@ -683,7 +686,7 @@ export default function Home() {
                   <div
                     className={`overflow-hidden transition-all duration-200 ${
                       presets.dietary_options.enabled
-                        ? "max-h-24 mt-4 opacity-100"
+                        ? "max-h-40 mt-4 opacity-100"
                         : "max-h-0 mt-0 opacity-0"
                     }`}
                   >
@@ -709,6 +712,27 @@ export default function Home() {
                       }
                       className="focus-visible:ring-primary"
                     />
+                    <div className="flex items-center justify-between mt-3 pt-3 border-t border-border">
+                      <label
+                        htmlFor="proceed-if-unavailable"
+                        className="text-sm text-muted-foreground cursor-pointer"
+                      >
+                        Still reserve if they can&apos;t accommodate
+                      </label>
+                      <Switch
+                        id="proceed-if-unavailable"
+                        checked={presets.dietary_options.proceed_if_unavailable}
+                        onCheckedChange={(checked) =>
+                          setPresets({
+                            ...presets,
+                            dietary_options: {
+                              ...presets.dietary_options,
+                              proceed_if_unavailable: checked,
+                            },
+                          })
+                        }
+                      />
+                    </div>
                   </div>
                 </CardContent>
               </Card>

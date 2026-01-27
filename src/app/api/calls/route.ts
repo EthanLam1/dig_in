@@ -2,6 +2,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
 import { getSupabaseAdmin } from "@/lib/supabaseAdmin";
+import { buildQuestionsToAsk, createRetellPhoneCall, type RetellDynamicVariables } from "@/lib/retell";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Zod Schemas (lenient input - missing presets are normalized later)
@@ -18,6 +19,7 @@ const dietaryOptionsInputSchema = z
   .object({
     enabled: z.boolean(),
     restriction: z.string().optional(),
+    proceed_if_unavailable: z.boolean().optional().nullable(),
   })
   .optional();
 
@@ -57,7 +59,7 @@ const createCallBodySchema = z.object({
 
 interface CanonicalPresets {
   wait_time_now: { enabled: boolean };
-  dietary_options: { enabled: boolean; restriction?: string };
+  dietary_options: { enabled: boolean; restriction?: string; proceed_if_unavailable?: boolean };
   hours_today: { enabled: boolean };
   takes_reservations: { enabled: boolean };
 }
@@ -81,15 +83,30 @@ function isValidE164(phone: string): boolean {
 /**
  * Normalizes input presets to canonical shape.
  * Missing presets default to { enabled: false }.
+ * If dietary_options.enabled=true, proceed_if_unavailable defaults to true if missing.
  */
 function normalizePresets(
   input: z.infer<typeof presetsInputSchema>
 ): CanonicalPresets {
   const defaultPreset = { enabled: false };
 
+  // Normalize dietary_options with proceed_if_unavailable defaulting to true when enabled
+  const inputDietary = input?.dietary_options;
+  let dietaryOptions: CanonicalPresets["dietary_options"];
+  if (inputDietary?.enabled) {
+    dietaryOptions = {
+      enabled: true,
+      restriction: inputDietary.restriction,
+      // Default proceed_if_unavailable to true when enabled and not explicitly set
+      proceed_if_unavailable: inputDietary.proceed_if_unavailable ?? true,
+    };
+  } else {
+    dietaryOptions = { enabled: false };
+  }
+
   return {
     wait_time_now: input?.wait_time_now ?? defaultPreset,
-    dietary_options: input?.dietary_options ?? defaultPreset,
+    dietary_options: dietaryOptions,
     hours_today: input?.hours_today ?? defaultPreset,
     takes_reservations: input?.takes_reservations ?? defaultPreset,
   };
@@ -427,10 +444,7 @@ export async function POST(request: NextRequest) {
     custom_questions: trimmedCustomQuestions,
   };
 
-  // Generate stub provider_call_id (no Retell call yet)
-  const providerCallId = `stub_${crypto.randomUUID()}`;
-
-  // Insert into database
+  // Insert into database with status 'queued' first (before calling Retell)
   const supabase = getSupabaseAdmin();
 
   // Build insert object based on call_intent
@@ -441,10 +455,10 @@ export async function POST(request: NextRequest) {
     restaurant_phone_e164,
     call_intent,
     questions_json: questionsJson,
-    status: "calling",
+    status: "queued",
     is_extracting: false,
     provider: "retell",
-    provider_call_id: providerCallId,
+    provider_call_id: null, // Will be set after Retell call succeeds
   };
 
   if (call_intent === "make_reservation") {
@@ -494,6 +508,96 @@ export async function POST(request: NextRequest) {
   if (artifactsError) {
     console.error("Failed to create call_artifacts:", artifactsError);
     // Non-fatal - the call was still created
+  }
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // Build questions_to_ask and create Retell outbound call
+  // ─────────────────────────────────────────────────────────────────────────
+  const retellAgentId = process.env.RETELL_AGENT_ID;
+  const retellFromNumber = process.env.RETELL_FROM_NUMBER;
+
+  if (!retellAgentId || !retellFromNumber) {
+    // Mark call as failed if env vars are missing
+    await supabase
+      .from("calls")
+      .update({
+        status: "failed",
+        failure_reason: "provider_error",
+        failure_details: "Server misconfiguration: RETELL_AGENT_ID or RETELL_FROM_NUMBER not set",
+      })
+      .eq("id", callData.id);
+
+    console.error("Missing RETELL_AGENT_ID or RETELL_FROM_NUMBER environment variable");
+    return NextResponse.json(
+      { error: "Call failed due to server configuration error. Please contact support." },
+      { status: 500 }
+    );
+  }
+
+  // Build questions_to_ask string for Retell dynamic variables
+  const questionsToAsk = buildQuestionsToAsk({
+    call_intent,
+    presets: normalizedPresets,
+    custom_questions: trimmedCustomQuestions,
+    ...(call_intent === "make_reservation" && {
+      reservation_party_size: reservation_party_size!,
+      reservation_datetime_local_iso: reservation_datetime_local_iso!,
+      reservation_name: reservation_name!.trim(),
+      reservation_phone_e164: reservation_phone_e164!,
+    }),
+  });
+
+  // Build dynamic variables for Retell
+  const dynamicVariables: RetellDynamicVariables = {
+    call_intent,
+    questions_to_ask: questionsToAsk,
+    ...(call_intent === "make_reservation" && {
+      reservation_name: reservation_name!.trim(),
+      reservation_phone_e164: reservation_phone_e164!,
+      reservation_datetime_local_iso: reservation_datetime_local_iso!,
+      reservation_timezone: reservation_timezone!,
+      reservation_party_size: String(reservation_party_size!),
+    }),
+  };
+
+  // Create the outbound call via Retell API
+  const retellResult = await createRetellPhoneCall({
+    from_number: retellFromNumber,
+    to_number: restaurant_phone_e164,
+    override_agent_id: retellAgentId,
+    retell_llm_dynamic_variables: dynamicVariables,
+  });
+
+  if (!retellResult.success) {
+    // Mark call as failed with provider error details
+    await supabase
+      .from("calls")
+      .update({
+        status: "failed",
+        failure_reason: "provider_error",
+        failure_details: retellResult.error.message,
+      })
+      .eq("id", callData.id);
+
+    console.error("Retell API error:", retellResult.error);
+    return NextResponse.json(
+      { error: `Call failed: ${retellResult.error.message}` },
+      { status: 500 }
+    );
+  }
+
+  // Update call with provider_call_id and set status to 'calling'
+  const { error: updateError } = await supabase
+    .from("calls")
+    .update({
+      provider_call_id: retellResult.data.call_id,
+      status: "calling",
+    })
+    .eq("id", callData.id);
+
+  if (updateError) {
+    console.error("Failed to update call with provider_call_id:", updateError);
+    // Non-fatal - the call was created and Retell call initiated
   }
 
   return NextResponse.json({ call_id: callData.id }, { status: 201 });
