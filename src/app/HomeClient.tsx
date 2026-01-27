@@ -141,6 +141,20 @@ export default function HomeClient() {
   const [error, setError] = useState<string | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
 
+  // Form interaction state for validation UX
+  const [touched, setTouched] = useState<Record<string, boolean>>({});
+  const [submitAttempted, setSubmitAttempted] = useState(false);
+
+  // Helper to mark a field as touched
+  const markTouched = (fieldName: string) => {
+    setTouched((prev) => ({ ...prev, [fieldName]: true }));
+  };
+
+  // Check if a field should show its error
+  const shouldShowError = (fieldName: string) => {
+    return touched[fieldName] || submitAttempted;
+  };
+
   // Prefill from query params (for retry)
   useEffect(() => {
     const name = searchParams.get("restaurant_name");
@@ -264,6 +278,7 @@ export default function HomeClient() {
 
   const handleSubmit = async () => {
     setError(null);
+    setSubmitAttempted(true);
 
     // Compose E.164 phone numbers
     const restaurantPhoneE164 = composeE164(restaurantCountryCode, restaurantNationalNumber);
@@ -369,17 +384,78 @@ export default function HomeClient() {
   const restaurantPhoneError = getPhoneValidationError(restaurantCountryCode, restaurantNationalNumber);
   const reservationPhoneError = getPhoneValidationError(reservationCountryCode, reservationNationalNumber);
 
-  // Form is valid when restaurant phone is provided, plus reservation fields when booking
-  const isFormValid = 
-    isPhoneValid(restaurantCountryCode, restaurantNationalNumber) &&
-    (callIntent === "questions_only" || (
-      reservationDate !== undefined &&
-      reservationTime !== "" &&
-      reservationPartySize >= 1 &&
-      reservationPartySize <= 20 &&
-      reservationName.trim() !== "" &&
-      isPhoneValid(reservationCountryCode, reservationNationalNumber)
-    ));
+  // Build disabledReasons array with human-readable messages for each failing requirement
+  const disabledReasons = useMemo(() => {
+    const reasons: string[] = [];
+
+    // Always required: restaurant phone
+    if (!isPhoneValid(restaurantCountryCode, restaurantNationalNumber)) {
+      const digits = normalizeToDigits(restaurantNationalNumber);
+      if (!digits) {
+        reasons.push("Restaurant phone number is required");
+      } else {
+        reasons.push("Restaurant phone number is invalid" + (restaurantPhoneError ? ` (${restaurantPhoneError})` : ""));
+      }
+    }
+
+    // At least 1 question OR call_intent is make_reservation
+    if (callIntent === "questions_only" && totalQuestions === 0) {
+      reasons.push("At least 1 question is required when not booking a reservation");
+    }
+
+    // If call_intent='make_reservation', also require reservation fields
+    if (callIntent === "make_reservation") {
+      if (!reservationDate) {
+        reasons.push("Reservation date is required");
+      }
+      if (!reservationTime) {
+        reasons.push("Reservation time is required");
+      }
+      if (!reservationPartySize || reservationPartySize < 1 || reservationPartySize > 20) {
+        if (!reservationPartySize || reservationPartySize < 1) {
+          reasons.push("Party size must be at least 1");
+        } else {
+          reasons.push("Party size must be 20 or less");
+        }
+      }
+      if (!reservationName.trim()) {
+        reasons.push("Reservation name is required");
+      }
+      if (!isPhoneValid(reservationCountryCode, reservationNationalNumber)) {
+        const digits = normalizeToDigits(reservationNationalNumber);
+        if (!digits) {
+          reasons.push("Callback phone number is required");
+        } else {
+          reasons.push("Callback phone number is invalid" + (reservationPhoneError ? ` (${reservationPhoneError})` : ""));
+        }
+      }
+    }
+
+    // If dietary preset enabled, restriction must be non-empty
+    if (presets.dietary_options.enabled && !presets.dietary_options.restriction.trim()) {
+      reasons.push("Dietary restriction is required when dietary options is enabled");
+    }
+
+    return reasons;
+  }, [
+    restaurantCountryCode,
+    restaurantNationalNumber,
+    restaurantPhoneError,
+    callIntent,
+    totalQuestions,
+    reservationDate,
+    reservationTime,
+    reservationPartySize,
+    reservationName,
+    reservationCountryCode,
+    reservationNationalNumber,
+    reservationPhoneError,
+    presets.dietary_options.enabled,
+    presets.dietary_options.restriction,
+  ]);
+
+  // Form is valid when there are no disabled reasons
+  const isFormValid = disabledReasons.length === 0;
 
   return (
     <div className="min-h-screen bg-gradient-to-b from-background via-background to-emerald-50/30">
@@ -512,13 +588,21 @@ export default function HomeClient() {
                         placeholder="(416) 555-1234"
                         value={restaurantNationalNumber}
                         onChange={(e) => setRestaurantNationalNumber(e.target.value)}
-                        className="focus-visible:ring-primary flex-1"
+                        onBlur={() => markTouched("restaurantPhone")}
+                        className={`focus-visible:ring-primary flex-1 ${
+                          !isPhoneValid(restaurantCountryCode, restaurantNationalNumber) && shouldShowError("restaurantPhone")
+                            ? "border-destructive/50"
+                            : ""
+                        }`}
                       />
                     </div>
-                    {restaurantPhoneError && (
+                    {restaurantPhoneError && shouldShowError("restaurantPhone") && (
                       <p className="mt-1.5 text-xs text-destructive">
                         {restaurantPhoneError}
                       </p>
+                    )}
+                    {!normalizeToDigits(restaurantNationalNumber) && shouldShowError("restaurantPhone") && (
+                      <p className="mt-1.5 text-xs text-destructive">Required</p>
                     )}
                   </div>
                 </div>
@@ -576,13 +660,13 @@ export default function HomeClient() {
                       <label className="mb-2 block text-sm font-medium">
                         Date <span className="text-destructive">*</span>
                       </label>
-                      <Popover>
+                      <Popover onOpenChange={(open) => { if (!open) markTouched("reservationDate"); }}>
                         <PopoverTrigger asChild>
                           <Button
                             variant="outline"
                             className={`w-full justify-start text-left font-normal ${
                               !reservationDate && "text-muted-foreground"
-                            }`}
+                            } ${!reservationDate && shouldShowError("reservationDate") ? "border-destructive/50" : ""}`}
                           >
                             <CalendarIcon className="mr-2 size-4" />
                             {reservationDate ? (
@@ -596,7 +680,10 @@ export default function HomeClient() {
                           <Calendar
                             mode="single"
                             selected={reservationDate}
-                            onSelect={setReservationDate}
+                            onSelect={(date) => {
+                              setReservationDate(date);
+                              markTouched("reservationDate");
+                            }}
                             disabled={(date) =>
                               date < today || date > maxDate
                             }
@@ -604,6 +691,9 @@ export default function HomeClient() {
                           />
                         </PopoverContent>
                       </Popover>
+                      {!reservationDate && shouldShowError("reservationDate") && (
+                        <p className="mt-1.5 text-xs text-destructive">Required</p>
+                      )}
                     </div>
                     <div>
                       <label className="mb-2 block text-sm font-medium">
@@ -644,8 +734,18 @@ export default function HomeClient() {
                       onChange={(e) =>
                         setReservationPartySize(parseInt(e.target.value) || 2)
                       }
-                      className="focus-visible:ring-primary"
+                      onBlur={() => markTouched("partySize")}
+                      className={`focus-visible:ring-primary ${
+                        (reservationPartySize < 1 || reservationPartySize > 20) && shouldShowError("partySize")
+                          ? "border-destructive/50"
+                          : ""
+                      }`}
                     />
+                    {(reservationPartySize < 1 || reservationPartySize > 20) && shouldShowError("partySize") && (
+                      <p className="mt-1.5 text-xs text-destructive">
+                        Must be between 1 and 20
+                      </p>
+                    )}
                   </div>
 
                   {/* Reservation Name */}
@@ -662,8 +762,14 @@ export default function HomeClient() {
                       placeholder="e.g., John Smith"
                       value={reservationName}
                       onChange={(e) => setReservationName(e.target.value)}
-                      className="focus-visible:ring-primary"
+                      onBlur={() => markTouched("reservationName")}
+                      className={`focus-visible:ring-primary ${
+                        !reservationName.trim() && shouldShowError("reservationName") ? "border-destructive/50" : ""
+                      }`}
                     />
+                    {!reservationName.trim() && shouldShowError("reservationName") && (
+                      <p className="mt-1.5 text-xs text-destructive">Required</p>
+                    )}
                   </div>
 
                   {/* Callback Phone */}
@@ -696,13 +802,21 @@ export default function HomeClient() {
                         placeholder="(416) 555-0000"
                         value={reservationNationalNumber}
                         onChange={(e) => setReservationNationalNumber(e.target.value)}
-                        className="focus-visible:ring-primary flex-1"
+                        onBlur={() => markTouched("callbackPhone")}
+                        className={`focus-visible:ring-primary flex-1 ${
+                          !isPhoneValid(reservationCountryCode, reservationNationalNumber) && shouldShowError("callbackPhone")
+                            ? "border-destructive/50"
+                            : ""
+                        }`}
                       />
                     </div>
-                    {reservationPhoneError && (
+                    {reservationPhoneError && shouldShowError("callbackPhone") && (
                       <p className="mt-1.5 text-xs text-destructive">
                         {reservationPhoneError}
                       </p>
+                    )}
+                    {!normalizeToDigits(reservationNationalNumber) && shouldShowError("callbackPhone") && !reservationPhoneError && (
+                      <p className="mt-1.5 text-xs text-destructive">Required</p>
                     )}
                     <div className="mt-1.5 flex items-start gap-1.5 text-xs text-muted-foreground">
                       <HelpCircle className="size-3.5 mt-0.5 shrink-0" />
@@ -799,7 +913,7 @@ export default function HomeClient() {
                       htmlFor="dietary-restriction"
                       className="block text-sm font-medium mb-1.5"
                     >
-                      Dietary restriction
+                      Dietary restriction <span className="text-destructive">*</span>
                     </label>
                     <Input
                       id="dietary-restriction"
@@ -815,8 +929,18 @@ export default function HomeClient() {
                           },
                         })
                       }
-                      className="focus-visible:ring-primary"
+                      onBlur={() => markTouched("dietaryRestriction")}
+                      className={`focus-visible:ring-primary ${
+                        presets.dietary_options.enabled && !presets.dietary_options.restriction.trim() && shouldShowError("dietaryRestriction")
+                          ? "border-destructive/50"
+                          : ""
+                      }`}
                     />
+                    {presets.dietary_options.enabled && !presets.dietary_options.restriction.trim() && shouldShowError("dietaryRestriction") && (
+                      <p className="mt-1.5 text-xs text-destructive">
+                        Required when dietary options is enabled
+                      </p>
+                    )}
                     <div className={`flex items-center justify-between mt-3 pt-3 border-t border-border ${
                       callIntent === "questions_only" ? "opacity-50" : ""
                     }`}>
@@ -959,6 +1083,23 @@ export default function HomeClient() {
       {/* Sticky Bottom Action Bar */}
       <div className="fixed bottom-0 left-0 right-0 bg-background/80 backdrop-blur-md border-t border-border shadow-lg">
         <div className="container mx-auto max-w-6xl px-4 py-4">
+          {/* Validation Errors Panel - Only show after submit attempted */}
+          {submitAttempted && disabledReasons.length > 0 && !isSubmitting && (
+            <div className="mb-3 p-3 bg-destructive/5 border border-destructive/20 rounded-lg animate-in fade-in slide-in-from-bottom-1 duration-200">
+              <p className="text-sm font-medium text-destructive mb-1.5">
+                To make the call, please fix:
+              </p>
+              <ul className="space-y-0.5">
+                {disabledReasons.map((reason, index) => (
+                  <li key={index} className="text-sm text-destructive/90 flex items-start gap-1.5">
+                    <span className="mt-0.5 shrink-0">•</span>
+                    <span>{reason}</span>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+          
           <div className="flex items-center justify-between gap-4">
             {/* Question Count */}
             <div className="flex items-center gap-2">
