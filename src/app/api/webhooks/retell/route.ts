@@ -19,6 +19,48 @@ const NO_HUMAN_REACHED_REASONS = new Set([
   "dial_failed",
 ]);
 
+// Voicemail transcript heuristics (case-insensitive)
+const VOICEMAIL_PHRASES = [
+  "forwarded to voicemail",
+  "record your message",
+  "at the tone",
+  "not available",
+];
+
+/**
+ * Detects if a call hit voicemail or no answer using:
+ * 1. Primary: call_analysis.in_voicemail
+ * 2. Secondary: call_analysis.call_successful === false + transcript voicemail phrases
+ * 3. Fallback: transcript heuristics if call_analysis is missing
+ */
+function isVoicemailOrNoAnswer(
+  callAnalysis: { in_voicemail?: boolean; call_successful?: boolean } | undefined | null,
+  transcript: string | undefined | null
+): boolean {
+  // Primary check: explicit voicemail flag from Retell
+  if (callAnalysis?.in_voicemail === true) {
+    return true;
+  }
+
+  // Secondary check: call not successful + voicemail phrases in transcript
+  if (callAnalysis?.call_successful === false && transcript) {
+    const lowerTranscript = transcript.toLowerCase();
+    if (VOICEMAIL_PHRASES.some((phrase) => lowerTranscript.includes(phrase))) {
+      return true;
+    }
+  }
+
+  // Fallback: transcript heuristics if call_analysis is missing
+  if (!callAnalysis && transcript) {
+    const lowerTranscript = transcript.toLowerCase();
+    if (VOICEMAIL_PHRASES.some((phrase) => lowerTranscript.includes(phrase))) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
 function canProgressStatus(
   currentStatus: string,
   newStatus: string
@@ -71,6 +113,11 @@ export async function POST(request: NextRequest) {
       transcript?: string;
       transcript_object?: unknown;
       disconnection_reason?: string;
+      call_analysis?: {
+        in_voicemail?: boolean;
+        call_successful?: boolean;
+        [key: string]: unknown;
+      };
       [key: string]: unknown;
     };
   };
@@ -113,29 +160,58 @@ export async function POST(request: NextRequest) {
   const currentStatus = callRow.status;
   const currentIsExtracting = callRow.is_extracting;
 
-  // 6.5. Idempotency check: if call is already terminal, short-circuit
+  // 6.5. Extract voicemail detection info early (needed for idempotency check)
+  const callAnalysis = call.call_analysis;
+  const transcriptText = call.transcript ?? null;
+  const detectedVoicemail = isVoicemailOrNoAnswer(callAnalysis, transcriptText);
+
+  // 6.6. Idempotency check: if call is already terminal, short-circuit
   // A call is terminal if status is 'completed' or 'failed' AND is_extracting is false
   // Retell can retry/duplicate webhooks, so we skip processing for already-finished calls
+  // EXCEPTION: allow call_analyzed to override completed status if voicemail is detected
   const isTerminal =
     (currentStatus === "completed" || currentStatus === "failed") &&
     !currentIsExtracting;
 
-  if (isTerminal) {
+  const shouldAllowVoicemailOverride =
+    event === "call_analyzed" &&
+    detectedVoicemail &&
+    currentStatus === "completed";
+
+  if (isTerminal && !shouldAllowVoicemailOverride) {
     console.log(
       `[Retell Webhook] Call ${callId} is already terminal (status=${currentStatus}), skipping duplicate event`
     );
     return new NextResponse(null, { status: 200 });
   }
 
+  if (shouldAllowVoicemailOverride) {
+    console.log(
+      `[Retell Webhook] Call ${callId} was completed but voicemail detected in call_analyzed, overriding to failed`
+    );
+  }
+
   // 7. Extract disconnection_reason from payload (for call_ended events)
   const disconnectionReason = call.disconnection_reason;
   const hasTranscript = !!(call.transcript || call.transcript_object);
 
-  // Check if this is a "no human reached" scenario
-  const isNoHumanReached =
+  // Check if this is a "no human reached" scenario from call_ended disconnection_reason
+  const isNoHumanReachedFromDisconnection =
     event === "call_ended" &&
     disconnectionReason &&
     NO_HUMAN_REACHED_REASONS.has(disconnectionReason);
+
+  // Check if this is a voicemail scenario from call_analyzed (using call_analysis + transcript)
+  const isVoicemailFromCallAnalyzed =
+    event === "call_analyzed" && detectedVoicemail;
+
+  // Combined check: either disconnection reason OR voicemail detection
+  const isNoHumanReached =
+    isNoHumanReachedFromDisconnection || isVoicemailFromCallAnalyzed;
+
+  // Also check for voicemail on call_ended using transcript heuristics (safety guard)
+  const isVoicemailFromCallEnded =
+    event === "call_ended" && detectedVoicemail;
 
   // Log disconnection reason for debugging
   if (event === "call_ended" && disconnectionReason) {
@@ -144,25 +220,49 @@ export async function POST(request: NextRequest) {
     );
   }
 
+  if (isVoicemailFromCallAnalyzed) {
+    console.log(
+      `[Retell Webhook] Call ${callId} voicemail detected from call_analyzed (in_voicemail=${callAnalysis?.in_voicemail}, call_successful=${callAnalysis?.call_successful})`
+    );
+  }
+
   // 8. Prepare updates for calls table
   const callUpdates: Record<string, unknown> = {
     updated_at: new Date().toISOString(),
   };
 
+  // Build failure_details for voicemail/no-answer scenarios
+  const buildFailureDetails = () => {
+    const details: Record<string, unknown> = {};
+    if (disconnectionReason) {
+      details.disconnection_reason = disconnectionReason;
+    }
+    if (callAnalysis?.in_voicemail !== undefined) {
+      details.in_voicemail = callAnalysis.in_voicemail;
+    }
+    if (callAnalysis?.call_successful !== undefined) {
+      details.call_successful = callAnalysis.call_successful;
+    }
+    return JSON.stringify(details);
+  };
+
   // 9. Handle different scenarios
-  if (isNoHumanReached) {
+  if (isNoHumanReached || isVoicemailFromCallEnded) {
     // No human was reached (voicemail, no answer, busy, dial failed)
     // Mark as failed and skip extraction
     callUpdates.status = "failed";
     callUpdates.is_extracting = false;
-    callUpdates.failure_reason =
-      disconnectionReason === "dial_failed"
-        ? "Call failed"
-        : "Your phone call was not answered";
-    callUpdates.failure_details = disconnectionReason;
+    callUpdates.failure_reason = "Your phone call was not answered";
+    callUpdates.failure_details = buildFailureDetails();
+
+    const reason = isVoicemailFromCallAnalyzed
+      ? "voicemail detected in call_analyzed"
+      : isVoicemailFromCallEnded
+      ? "voicemail detected in call_ended"
+      : `disconnection: ${disconnectionReason}`;
 
     console.log(
-      `[Retell Webhook] Call ${callId} marked as failed: no human reached (${disconnectionReason})`
+      `[Retell Webhook] Call ${callId} marked as failed: no human reached (${reason})`
     );
   } else {
     // Normal status progression
@@ -241,11 +341,30 @@ export async function POST(request: NextRequest) {
   }
 
   // 12. Run extraction on call_analyzed (preferred) or call_ended if transcript exists
-  // IMPORTANT: Skip extraction for "no human reached" scenarios
-  if (isNoHumanReached) {
+  // IMPORTANT: Skip extraction for "no human reached" or voicemail scenarios
+  const shouldSkipExtraction = isNoHumanReached || isVoicemailFromCallEnded;
+
+  if (shouldSkipExtraction) {
     console.log(
-      `[Retell Webhook] Skipping extraction for call ${callId} (no human reached)`
+      `[Retell Webhook] Skipping extraction for call ${callId} (no human reached / voicemail)`
     );
+
+    // Clear answers_json if it was already written (idempotency: voicemail detected after extraction ran)
+    const { error: clearAnswersError } = await supabase
+      .from("call_artifacts")
+      .update({ answers_json: null, updated_at: new Date().toISOString() })
+      .eq("call_id", callId);
+
+    if (clearAnswersError) {
+      console.error(
+        `[Retell Webhook] Failed to clear answers_json for ${callId}:`,
+        clearAnswersError
+      );
+    } else {
+      console.log(
+        `[Retell Webhook] Cleared answers_json for call ${callId} (voicemail)`
+      );
+    }
   } else if (event === "call_analyzed" && hasTranscript) {
     // Prefer call_analyzed as it has more complete data
     // Extraction runs asynchronously but we await to ensure it completes before responding
