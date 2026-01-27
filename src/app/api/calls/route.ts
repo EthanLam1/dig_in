@@ -542,6 +542,7 @@ export async function POST(request: NextRequest) {
     ...(call_intent === "make_reservation" && {
       reservation_party_size: reservation_party_size!,
       reservation_datetime_local_iso: reservation_datetime_local_iso!,
+      reservation_timezone: reservation_timezone!,
       reservation_name: reservation_name!.trim(),
       reservation_phone_e164: reservation_phone_e164!,
     }),

@@ -78,6 +78,7 @@ export function buildQuestionsToAsk(params: {
   // Only provided for make_reservation
   reservation_party_size?: number;
   reservation_datetime_local_iso?: string;
+  reservation_timezone?: string;
   reservation_name?: string;
   reservation_phone_e164?: string;
 }): string {
@@ -106,7 +107,7 @@ export function buildQuestionsToAsk(params: {
     // ─────────────────────────────────────────────────────────────────────────
     // B) Booking sequence (always after gatekeepers)
     // ─────────────────────────────────────────────────────────────────────────
-    const formattedDateTime = formatDateTimeForAgent(params.reservation_datetime_local_iso!);
+    const formattedDateTime = formatDateTimeForAgent(params.reservation_datetime_local_iso!, params.reservation_timezone!);
     lines.push(`I'd like to make a reservation for ${params.reservation_party_size}.`);
     lines.push(`I can only do ${formattedDateTime} — is that exact time available?`);
     lines.push(`Can I book it under the name ${params.reservation_name}?`);
@@ -216,57 +217,37 @@ function formatPhoneForTTS(phoneE164: string): string {
 
 /**
  * Formats a local ISO datetime string for human-readable speech.
- * Uses relative terms like "today" or "tomorrow" when applicable.
- * e.g., "2026-01-26T19:00:00" -> "tomorrow at 7:00 PM" or "January 26 at 7:00 PM"
+ * Always uses explicit calendar date + time (no relative terms like "today" or "tomorrow").
+ * e.g., "2026-01-27T19:00:00" -> "Tue, Jan 27 at 7:00 PM"
  */
-function formatDateTimeForAgent(datetimeLocalIso: string): string {
+function formatDateTimeForAgent(datetimeLocalIso: string, timezone: string): string {
   try {
-    // Parse without timezone - treat as local time
+    // Parse the datetime and format it in the specified timezone
     const date = new Date(datetimeLocalIso);
-    const now = new Date();
     
-    // Get date-only values for comparison (strip time component)
-    const targetYear = date.getFullYear();
-    const targetMonth = date.getMonth();
-    const targetDay = date.getDate();
-    
-    const todayYear = now.getFullYear();
-    const todayMonth = now.getMonth();
-    const todayDay = now.getDate();
-    
-    // Calculate tomorrow
-    const tomorrow = new Date(now);
-    tomorrow.setDate(tomorrow.getDate() + 1);
-    const tomorrowYear = tomorrow.getFullYear();
-    const tomorrowMonth = tomorrow.getMonth();
-    const tomorrowDay = tomorrow.getDate();
-    
-    // Format time portion
-    const timeOptions: Intl.DateTimeFormatOptions = {
+    // Format with explicit weekday, month, and day - never use relative terms
+    const dateTimeOptions: Intl.DateTimeFormatOptions = {
+      timeZone: timezone,
+      weekday: "short",
+      month: "short",
+      day: "numeric",
       hour: "numeric",
       minute: "2-digit",
       hour12: true,
     };
-    const timeStr = date.toLocaleString("en-US", timeOptions);
     
-    // Check if date is today
-    if (targetYear === todayYear && targetMonth === todayMonth && targetDay === todayDay) {
-      return `today at ${timeStr}`;
-    }
+    // Format as "Tue, Jan 27, 7:00 PM" then adjust to "Tue, Jan 27 at 7:00 PM"
+    const parts = new Intl.DateTimeFormat("en-US", dateTimeOptions).formatToParts(date);
     
-    // Check if date is tomorrow
-    if (targetYear === tomorrowYear && targetMonth === tomorrowMonth && targetDay === tomorrowDay) {
-      return `tomorrow at ${timeStr}`;
-    }
+    const weekday = parts.find((p) => p.type === "weekday")?.value || "";
+    const month = parts.find((p) => p.type === "month")?.value || "";
+    const day = parts.find((p) => p.type === "day")?.value || "";
+    const hour = parts.find((p) => p.type === "hour")?.value || "";
+    const minute = parts.find((p) => p.type === "minute")?.value || "";
+    const dayPeriod = parts.find((p) => p.type === "dayPeriod")?.value || "";
     
-    // For other dates, use "Month Day at Time" (omit year if same year)
-    const dateOptions: Intl.DateTimeFormatOptions = {
-      month: "long",
-      day: "numeric",
-    };
-    const dateStr = date.toLocaleString("en-US", dateOptions);
-    
-    return `${dateStr} at ${timeStr}`;
+    // Build: "Tue, Jan 27 at 7:00 PM"
+    return `${weekday}, ${month} ${day} at ${hour}:${minute} ${dayPeriod}`;
   } catch {
     // Fallback to raw string if parsing fails
     return datetimeLocalIso;

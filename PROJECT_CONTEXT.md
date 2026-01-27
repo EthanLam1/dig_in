@@ -757,6 +757,8 @@ Environment variables:
 
 - The agent MUST ask one at a time, skip irrelevant steps when earlier answers make later steps impossible (e.g., do not attempt booking if they do not take reservations), and end politely.
 
+- **`formatted_datetime_local` format:** `formatted_datetime_local` must always be an explicit calendar date + time (e.g., "Tue, Jan 27 at 7:00 PM"). Do NOT use relative words like "today" or "tomorrow". This is formatted from `reservation_datetime_local_iso` + `reservation_timezone`.
+
 - **Callback phone formatting for TTS:** Callback phone must be spoken digit-by-digit with pauses (e.g., "6 4 7, 5 5 5, 0 0 0 0") to prevent TTS reading chunks as "six hundred...". For +1 (US/Canada) numbers, omit "+" and country code, then space each digit with commas between groups (area code, prefix, line number). For other international numbers, remove "+" and speak digit-by-digit with commas every 3-4 digits.
 
 
