@@ -42,6 +42,7 @@ interface ExtractionOutput {
 interface CallData {
   id: string;
   call_intent: string;
+  restaurant_phone_e164: string;
   reservation_name: string | null;
   reservation_phone_e164: string | null;
   reservation_datetime_local_iso: string | null;
@@ -341,6 +342,149 @@ function normalizeExtractionOutput(
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Shared Signal Publishing (after extraction)
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Allowlisted signal types for publishing
+const ALLOWLISTED_SIGNAL_TYPES = ["hours_today", "takes_reservations"] as const;
+type SignalType = (typeof ALLOWLISTED_SIGNAL_TYPES)[number];
+
+// TTL defaults for each signal type
+const SIGNAL_TTL_HOURS: Record<SignalType, number> = {
+  hours_today: 24, // 24 hours
+  takes_reservations: 30 * 24, // 30 days
+};
+
+/**
+ * Validates E.164 phone number format.
+ */
+function isValidE164(phone: string | null | undefined): phone is string {
+  if (!phone) return false;
+  return /^\+\d{1,15}$/.test(phone);
+}
+
+/**
+ * Matches an answer's question text to a signal type.
+ * Returns the signal type if matched, or null if no match.
+ *
+ * Matching rules:
+ * - hours_today: question contains "hours" (case-insensitive)
+ * - takes_reservations: question contains "take reservations" or "takes reservations"
+ */
+function matchQuestionToSignalType(question: string): SignalType | null {
+  const lowerQuestion = question.toLowerCase();
+
+  // hours_today: contains "hours"
+  if (lowerQuestion.includes("hours")) {
+    return "hours_today";
+  }
+
+  // takes_reservations: contains "take reservations" or "takes reservations"
+  if (
+    lowerQuestion.includes("take reservations") ||
+    lowerQuestion.includes("takes reservations")
+  ) {
+    return "takes_reservations";
+  }
+
+  return null;
+}
+
+/**
+ * Publishes shared signals to restaurant_signals table.
+ * Only publishes allowlisted signal types (hours_today, takes_reservations).
+ * Uses last-write-wins upsert on (restaurant_phone_e164, signal_type).
+ *
+ * @param callId - The source call ID (for debugging)
+ * @param restaurantPhoneE164 - The restaurant phone number (E.164)
+ * @param answers - The extracted answers array from answers_json
+ */
+async function publishSharedSignals(
+  callId: string,
+  restaurantPhoneE164: string,
+  answers: AnswerItem[]
+): Promise<void> {
+  const supabase = getSupabaseAdmin();
+  const now = new Date();
+  const publishedSignals: string[] = [];
+
+  for (const answer of answers) {
+    const signalType = matchQuestionToSignalType(answer.question);
+
+    if (!signalType) {
+      continue; // Not an allowlisted signal type
+    }
+
+    // Derive signal_value_text
+    let signalValueText: string;
+    if (signalType === "takes_reservations") {
+      // Normalize to "Yes" or "No" if clearly positive/negative
+      const lowerAnswer = answer.answer.toLowerCase();
+      if (
+        lowerAnswer.includes("yes") ||
+        lowerAnswer.includes("we do") ||
+        lowerAnswer.includes("accept")
+      ) {
+        signalValueText = "Yes";
+      } else if (
+        lowerAnswer.includes("no") ||
+        lowerAnswer.includes("don't") ||
+        lowerAnswer.includes("do not")
+      ) {
+        signalValueText = "No";
+      } else {
+        // Keep raw answer if unclear
+        signalValueText = answer.answer;
+      }
+    } else {
+      // For hours_today, use the answer directly (optionally include details)
+      signalValueText = answer.answer;
+      if (answer.details && answer.details.trim()) {
+        // Append brief details if useful, keep it short
+        signalValueText = `${answer.answer} (${answer.details.slice(0, 100)})`;
+      }
+    }
+
+    // Calculate expires_at based on TTL
+    const ttlHours = SIGNAL_TTL_HOURS[signalType];
+    const expiresAt = new Date(now.getTime() + ttlHours * 60 * 60 * 1000);
+
+    // Upsert into restaurant_signals
+    const { error } = await supabase.from("restaurant_signals").upsert(
+      {
+        restaurant_phone_e164: restaurantPhoneE164,
+        signal_type: signalType,
+        signal_value_text: signalValueText,
+        confidence: answer.confidence ?? null,
+        source_call_id: callId,
+        observed_at: now.toISOString(),
+        expires_at: expiresAt.toISOString(),
+        updated_at: now.toISOString(),
+      },
+      {
+        onConflict: "restaurant_phone_e164,signal_type",
+      }
+    );
+
+    if (error) {
+      console.error(
+        `[publishSharedSignals] Failed to upsert ${signalType} for ${restaurantPhoneE164}:`,
+        error
+      );
+    } else {
+      publishedSignals.push(signalType);
+    }
+  }
+
+  // Log one concise line when publishing signals
+  if (publishedSignals.length > 0) {
+    console.log(
+      `[publishSharedSignals] Published signals for ${restaurantPhoneE164}: ${publishedSignals.join(", ")}`
+    );
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Main Extraction Function
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -388,7 +532,7 @@ export async function extractAnswers(
   const { data: callData, error: fetchError } = await supabase
     .from("calls")
     .select(
-      "id, call_intent, reservation_name, reservation_phone_e164, reservation_datetime_local_iso, reservation_timezone, reservation_party_size, questions_json"
+      "id, call_intent, restaurant_phone_e164, reservation_name, reservation_phone_e164, reservation_datetime_local_iso, reservation_timezone, reservation_party_size, questions_json"
     )
     .eq("id", callId)
     .single();
@@ -467,6 +611,28 @@ export async function extractAnswers(
       `[extractAnswers] Failed to update call ${callId}:`,
       updateError
     );
+  }
+
+  // 6. Publish shared signals to restaurant_signals (after successful extraction)
+  // Only publish if restaurant_phone_e164 is valid E.164 and answers exist
+  if (
+    isValidE164(callData.restaurant_phone_e164) &&
+    extractedData.answers &&
+    extractedData.answers.length > 0
+  ) {
+    try {
+      await publishSharedSignals(
+        callId,
+        callData.restaurant_phone_e164,
+        extractedData.answers
+      );
+    } catch (err) {
+      // Log but don't fail extraction if signal publishing fails
+      console.error(
+        `[extractAnswers] Failed to publish shared signals for call ${callId}:`,
+        err
+      );
+    }
   }
 
   console.log(`[extractAnswers] Successfully extracted answers for call ${callId}`);

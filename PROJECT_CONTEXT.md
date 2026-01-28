@@ -14,6 +14,8 @@ Dig In is a Next.js web app that books restaurant reservations via a voice agent
 - UI: Tailwind + shadcn/ui
     
 - DB: Supabase Postgres
+
+- Shared Signals: Supabase table `restaurant_signals` (crowd-sourced hours_today + takes_reservations keyed by restaurant_phone_e164)
     
 - Auth: none (MVP). Use anonymous `session_id` cookie for session-scoped history.
     
@@ -71,6 +73,24 @@ Optional inputs:
     
 
 Extra questions:
+
+Shared Signals (read-only UI helper):
+
+After restaurant_phone_e164 is entered and valid, the UI should fetch shared signals for that restaurant and show a small card "Recent info from Dig In".
+
+Card may show (if available and non-expired):
+
+- hours_today (with "last updated … ago")
+
+- takes_reservations (with "last updated … ago")
+
+If recent hours_today exists (non-expired), prompt the user:
+
+"We already have recent hours — skip asking?"
+
+- If user chooses "Skip", disable the hours_today preset toggle for this call.
+
+- If user chooses "Ask anyway", keep hours_today enabled as normal.
 
 - Preset toggles + inputs (optional):
     
@@ -290,6 +310,32 @@ Indexes:
 - `raw_provider_payload_json` jsonb NULL
     
 - `created_at`, `updated_at`
+
+### 5.3 `restaurant_signals` (shared signals)
+
+- `id` uuid PK
+
+- `restaurant_phone_e164` text NOT NULL
+
+- `signal_type` text NOT NULL (`hours_today` | `takes_reservations`)
+
+- `signal_value_text` text NOT NULL
+
+- `confidence` numeric NULL
+
+- `source_call_id` uuid NULL (references calls.id; debug only, not shown to users)
+
+- `observed_at` timestamptz default now()
+
+- `expires_at` timestamptz NULL
+
+- unique constraint on (`restaurant_phone_e164`, `signal_type`) for last-write-wins
+
+TTL defaults:
+
+- `hours_today` expires after 24 hours
+
+- `takes_reservations` expires after 30 days
     
 
 ## 6) Canonical JSON Contracts
@@ -661,6 +707,12 @@ Event behavior (MVP mapping):
         - write call_artifacts.answers_json
             
         - set calls.reservation_status + calls.reservation_result_json from extracted reservation object
+
+        - After extraction is written, publish shared signals to `restaurant_signals` (upsert by `restaurant_phone_e164` + `signal_type`) for allowlisted signal types only:
+            - `hours_today`
+            - `takes_reservations`
+        - Set `expires_at` based on TTL defaults (`hours_today`: now()+24h, `takes_reservations`: now()+30d)
+        - Do NOT publish transcript, reservation details, or any PII (only these allowlisted signals)
             
     - calls.is_extracting = false
         
@@ -743,6 +795,38 @@ Response shape:
 Rules:
 - session_id cookie must exist
 - if phone is missing from Google, return restaurant_phone_e164 = null and UI must require manual entry    
+
+### 7.8 GET /api/restaurants/signals
+
+Purpose:
+
+- Return the latest non-expired shared signals for a restaurant phone number.
+
+- Used by `/` to render "Recent info from Dig In" card.
+
+Query params:
+
+- `restaurant_phone_e164` (string, required; E.164)
+
+Response shape:
+
+{
+  "items": [
+    {
+      "signal_type": "hours_today" | "takes_reservations",
+      "signal_value_text": "string",
+      "confidence": number | null,
+      "observed_at": "ISO string",
+      "expires_at": "ISO string | null"
+    }
+  ]
+}
+
+Rules:
+
+- Only return rows where `expires_at IS NULL OR expires_at > now()`
+
+- Scope: public/shared across sessions (NOT filtered by session_id)
 
 ## 8) Session Handling
 
@@ -843,6 +927,10 @@ Environment variables:
 
 The MVP is designed so these are additive changes:
 
+- **Shared Signals expansion:**
+  - MVP shares only `hours_today` and `takes_reservations`
+  - Later could add `wait_time_now` with short TTL, dietary notes, and use Place ID for identity
+
 - **Google Places restaurant selection (Autocomplete + Near me):**
   - Keep restaurant selection normalized to the existing fields: `restaurant_name` + `restaurant_phone_e164`.
   - Future optional DB columns (nullable) may be added without breaking current flows:
@@ -856,11 +944,6 @@ The MVP is designed so these are additive changes:
     - `reservation_window_start_local_iso`, `reservation_window_end_local_iso`
   - Agent behavior becomes: “book any available slot in the window,” and the chosen slot is stored in `reservation_result_json` + `answers_json.reservation.confirmed_datetime_local_iso`.
 
-- **Full auth (Supabase Auth):**
-  - `calls.user_id` remains nullable and can be populated after login.
-  - Future behavior: scope history by `user_id` (cross-device), and migrate existing `session_id` calls to `user_id` upon login.
-  - During migration period, reads may be `(user_id == authed_user) OR (session_id == current_session)`.
-
 - **Webhook security hardening:**
   - MVP uses Retell's official `x-retell-signature` header verification via retell-sdk.
   - Future improvement: additional rate limiting or IP allowlisting without changing endpoint paths or payload storage.
@@ -870,7 +953,7 @@ The MVP is designed so these are additive changes:
 
 - Do NOT add new routes beyond `/` and `/calls`
     
-- Do NOT add new API endpoints beyond those listed in section 7 (calls + retell webhook + places proxies)
+- Do NOT add new API endpoints beyond those listed in section 7 (calls + retell webhook + places proxies + restaurants/signals)
     
 - Do NOT change DB table names
     

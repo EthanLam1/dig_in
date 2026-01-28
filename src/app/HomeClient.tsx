@@ -36,6 +36,7 @@ import {
   Search,
   MapPin,
   X,
+  Info,
 } from "lucide-react";
 import Link from "next/link";
 import { EmojiBackground } from "@/components/EmojiBackground";
@@ -61,6 +62,80 @@ interface PlaceDetails {
   restaurant_name: string;
   restaurant_phone_e164: string | null;
   restaurant_address: string;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Restaurant Signals Types
+// ─────────────────────────────────────────────────────────────────────────────
+
+interface SignalItem {
+  signal_type: "hours_today" | "takes_reservations";
+  signal_value_text: string;
+  confidence: number | null;
+  observed_at: string; // ISO
+  expires_at: string | null; // ISO
+}
+
+interface SignalsResponse {
+  items: SignalItem[];
+}
+
+/**
+ * Validates E.164 phone number format.
+ * Must start with + followed by digits only.
+ */
+function isValidE164Phone(phone: string): boolean {
+  return /^\+\d{1,15}$/.test(phone);
+}
+
+/**
+ * Formats relative time from an ISO date string.
+ * Returns strings like "5 min ago", "2 hours ago", "3 days ago".
+ */
+function formatRelativeTime(isoDateString: string): string {
+  const then = new Date(isoDateString).getTime();
+  const now = Date.now();
+  const diffMs = now - then;
+  
+  const seconds = Math.floor(diffMs / 1000);
+  const minutes = Math.floor(seconds / 60);
+  const hours = Math.floor(minutes / 60);
+  const days = Math.floor(hours / 24);
+  
+  if (days > 0) {
+    return `${days} day${days === 1 ? "" : "s"} ago`;
+  }
+  if (hours > 0) {
+    return `${hours} hour${hours === 1 ? "" : "s"} ago`;
+  }
+  if (minutes > 0) {
+    return `${minutes} min ago`;
+  }
+  return "just now";
+}
+
+/**
+ * Fetches shared signals for a restaurant phone number.
+ * Returns an array of SignalItem or empty array on error.
+ */
+async function fetchSignals(restaurantPhoneE164: string): Promise<SignalItem[]> {
+  try {
+    const params = new URLSearchParams({ restaurant_phone_e164: restaurantPhoneE164 });
+    const response = await fetch(`/api/restaurants/signals?${params}`, {
+      cache: "no-store",
+    });
+    
+    if (!response.ok) {
+      // Treat non-200 as no signals
+      return [];
+    }
+    
+    const data: SignalsResponse = await response.json();
+    return data.items || [];
+  } catch {
+    // Network error - treat as no signals
+    return [];
+  }
 }
 
 // Generate a random session token for Google Places billing optimization
@@ -196,6 +271,15 @@ export default function HomeClient() {
   const placesSearchRef = useRef<HTMLDivElement>(null);
   const debounceTimerRef = useRef<NodeJS.Timeout | null>(null);
 
+  // ─────────────────────────────────────────────────────────────────────────
+  // Restaurant Signals State
+  // ─────────────────────────────────────────────────────────────────────────
+  const [signalsItems, setSignalsItems] = useState<SignalItem[]>([]);
+  const [signalsLoading, setSignalsLoading] = useState(false);
+  const [userDecisionSkipHours, setUserDecisionSkipHours] = useState<boolean | null>(null);
+  const signalsDebounceRef = useRef<NodeJS.Timeout | null>(null);
+  const lastFetchedPhoneRef = useRef<string | null>(null);
+
   // Helper to mark a field as touched
   const markTouched = (fieldName: string) => {
     setTouched((prev) => ({ ...prev, [fieldName]: true }));
@@ -234,6 +318,55 @@ export default function HomeClient() {
 
   // Get user timezone
   const userTimezone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // Fetch Signals When Phone Becomes Valid
+  // ─────────────────────────────────────────────────────────────────────────
+  
+  // Compose current E.164 phone for signal fetching
+  const currentPhoneE164 = composeE164(restaurantCountryCode, restaurantNationalNumber);
+  const isPhoneE164Valid = isValidE164Phone(currentPhoneE164);
+
+  useEffect(() => {
+    // Clear existing debounce timer
+    if (signalsDebounceRef.current) {
+      clearTimeout(signalsDebounceRef.current);
+    }
+
+    // If phone is invalid or empty, reset signals state
+    if (!isPhoneE164Valid) {
+      setSignalsItems([]);
+      setSignalsLoading(false);
+      setUserDecisionSkipHours(null);
+      lastFetchedPhoneRef.current = null;
+      return;
+    }
+
+    // If phone hasn't changed, don't refetch
+    if (lastFetchedPhoneRef.current === currentPhoneE164) {
+      return;
+    }
+
+    // Reset user decision when phone changes
+    setUserDecisionSkipHours(null);
+
+    // Debounce the fetch
+    signalsDebounceRef.current = setTimeout(async () => {
+      setSignalsLoading(true);
+      
+      const items = await fetchSignals(currentPhoneE164);
+      
+      setSignalsItems(items);
+      setSignalsLoading(false);
+      lastFetchedPhoneRef.current = currentPhoneE164;
+    }, 250);
+
+    return () => {
+      if (signalsDebounceRef.current) {
+        clearTimeout(signalsDebounceRef.current);
+      }
+    };
+  }, [currentPhoneE164, isPhoneE164Valid]);
 
   // ─────────────────────────────────────────────────────────────────────────
   // Google Places Functions
@@ -1384,6 +1517,89 @@ export default function HomeClient() {
                 </div>
               </CardContent>
             </Card>
+            )}
+
+            {/* Recent Info from Dig In - Signals Card */}
+            {(signalsLoading || signalsItems.length > 0) && (
+              <Card className="shadow-md border-primary/20 bg-primary/5">
+                <CardContent className="pt-5 pb-5">
+                  <div className="flex items-center gap-2 mb-3">
+                    <Info className="size-4 text-primary" />
+                    <h3 className="text-sm font-semibold text-primary">Recent info from Dig In</h3>
+                  </div>
+                  
+                  {signalsLoading ? (
+                    <div className="flex items-center gap-2 text-sm text-muted-foreground">
+                      <Loader2 className="size-4 animate-spin" />
+                      <span>Loading recent info...</span>
+                    </div>
+                  ) : (
+                    <div className="space-y-3">
+                      {signalsItems.map((signal, index) => {
+                        const isHoursToday = signal.signal_type === "hours_today";
+                        const isTakesReservations = signal.signal_type === "takes_reservations";
+                        
+                        return (
+                          <div key={index} className="space-y-1">
+                            <div className="flex items-start justify-between gap-2">
+                              <div>
+                                <span className="text-sm font-medium">
+                                  {isHoursToday ? "Hours today" : isTakesReservations ? "Takes reservations" : signal.signal_type}
+                                </span>
+                                <p className="text-sm text-foreground">
+                                  {signal.signal_value_text}
+                                </p>
+                                <p className="text-xs text-muted-foreground">
+                                  Last updated {formatRelativeTime(signal.observed_at)}
+                                </p>
+                              </div>
+                            </div>
+                            
+                            {/* Skip asking prompt for hours_today */}
+                            {isHoursToday && userDecisionSkipHours === null && (
+                              <div className="mt-2 p-2 bg-background rounded-md border border-border">
+                                <p className="text-sm text-muted-foreground mb-2">
+                                  We already have recent hours — skip asking?
+                                </p>
+                                <div className="flex gap-2">
+                                  <Button
+                                    type="button"
+                                    variant="outline"
+                                    size="sm"
+                                    onClick={() => {
+                                      setUserDecisionSkipHours(true);
+                                      setPresets((prev) => ({ ...prev, hours_today: false }));
+                                    }}
+                                  >
+                                    Skip
+                                  </Button>
+                                  <Button
+                                    type="button"
+                                    variant="outline"
+                                    size="sm"
+                                    onClick={() => {
+                                      setUserDecisionSkipHours(false);
+                                    }}
+                                  >
+                                    Ask anyway
+                                  </Button>
+                                </div>
+                              </div>
+                            )}
+                            
+                            {/* Show decision feedback */}
+                            {isHoursToday && userDecisionSkipHours === true && (
+                              <p className="text-xs text-muted-foreground mt-1 italic">
+                                Skipped — won&apos;t ask about hours
+                              </p>
+                            )}
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
+                </CardContent>
+              </Card>
             )}
 
             {/* Preset Questions Section */}

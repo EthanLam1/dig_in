@@ -21,7 +21,6 @@ Book restaurant reservations for the user via an AI phone agent:
 - Polished Google Places metadata (photos/ratings/reviews/open-now/distance). MVP Places is limited to autocomplete + “Near me” + phone autofill.
 - Real-time streaming transcripts (final transcript only)
 - Audio recording playback (transcript only)
-- Full user authentication (anonymous session history only)
 - Heavy scalability/security beyond basic best practices
 
 ---
@@ -48,6 +47,11 @@ If the user chooses ‘Questions only’, these fields are hidden/optional and n
 **Optional extras**
 - Restaurant name (optional label for UI/history)
 - Restaurant search (Google Places, optional): typeahead autocomplete + “Near me” list. Selecting a place fetches details and auto-fills restaurant_name + restaurant_phone_e164. If phone is missing, user must enter phone manually.
+- Recent info from Dig In (shared signals, optional): after restaurant_phone_e164 is entered/valid, show a small card with:
+  - Hours today (if available and fresh)
+  - Takes reservations (if available and fresh)
+  - Show "Last updated … ago"
+  - If recent hours are available, prompt the user: "We already have recent hours — skip asking?" and let them decide whether to enable the "What are your hours today?" preset.
 - Preset extra questions (toggles + inputs):
   1. “What’s the wait time right now?”
   2. “Do you have __ options?” (dietary restriction input)
@@ -128,9 +132,10 @@ On success, create the call and navigate to `/calls` with the newly created call
 1. **Web Client (Next.js)**
 2. **App Server (Next.js Route Handlers)**
 3. **DB (Supabase Postgres)**
-4. **Retell** for outbound calling + webhook callbacks
-5. **OpenAI API** for transcript → structured extraction (`answers_json` + reservation result)
-6. **Google Places API** for restaurant search (Autocomplete + Nearby + Place Details for phone lookup)
+4. **Shared Signals (Supabase table: restaurant_signals)** for crowd-sourced "hours today" and "takes reservations" by restaurant phone
+5. **Retell** for outbound calling + webhook callbacks
+6. **OpenAI API** for transcript → structured extraction (`answers_json` + reservation result)
+7. **Google Places API** for restaurant search (Autocomplete + Nearby + Place Details for phone lookup)
 
 ### End-to-end flow
 1. User submits reservation + extra questions on `/`
@@ -142,7 +147,9 @@ On success, create the call and navigate to `/calls` with the newly created call
    - reservation outcome + details
    - structured answers for extra questions
 7. Server stores extraction output, updates reservation result fields, sets `is_extracting=false`
-8. UI shows reservation outcome, answers, and transcript
+8. Server publishes shared restaurant signals (hours_today, takes_reservations) into `restaurant_signals` keyed by `restaurant_phone_e164`, with TTL (hours_today: 24h, takes_reservations: 30d)
+9. UI shows reservation outcome, answers, and transcript
+10. On `/`, after the user enters a restaurant phone, the UI fetches recent shared signals (if any) and displays the "Recent info from Dig In" card
 
 ---
 
@@ -205,6 +212,20 @@ New reservation result fields (P0):
 - `raw_provider_payload_json` (jsonb, NULL)
 - `created_at`, `updated_at`
 
+### `restaurant_signals` (shared signals)
+
+- `id` (uuid, PK)
+- `restaurant_phone_e164` (text, NOT NULL)
+- `signal_type` (text, NOT NULL) — one of: `hours_today` | `takes_reservations`
+- `signal_value_text` (text, NOT NULL) — e.g. "Open until 11 PM today", "Yes", "No"
+- `confidence` (numeric, NULL)
+- `source_call_id` (uuid, NULL) — reference for debugging only (not shown to users)
+- `observed_at` (timestamptz, default now())
+- `expires_at` (timestamptz, NULL)
+- unique constraint on (`restaurant_phone_e164`, `signal_type`) so latest write overwrites (last write wins)
+
+TTL defaults: hours_today expires after 24 hours; takes_reservations expires after 30 days.
+
 ---
 
 ## API Surface
@@ -256,6 +277,11 @@ New reservation result fields (P0):
 - Query params: `placeId` (required), `sessionToken` (optional)
 - Returns: `restaurant_name`, `restaurant_phone_e164` (if available), and optional `address`
 - If phone is missing from Google, UI must fall back to manual phone entry
+
+### `GET /api/restaurants/signals`
+- Query params: `restaurant_phone_e164` (required)
+- Returns the latest non-expired signals for that restaurant (hours_today, takes_reservations), including `signal_value_text` and `observed_at`
+- Used by `/` to show "Recent info from Dig In"
 
 ---
 
@@ -326,7 +352,7 @@ This contains optional “extra questions” beyond the reservation booking. Exa
     
 - All call history is scoped to that session.
     
-- Schema keeps a nullable `user_id` so Supabase Auth can be added later without rewriting tables.
+- No user accounts in MVP; history is session-scoped via `session_id`.
     
 
 ---
@@ -350,9 +376,9 @@ This contains optional “extra questions” beyond the reservation booking. Exa
 
 - Enhance Google Places results: photos/ratings/open-now/distance + optionally store place metadata (place_id/address/lat/lng)
 
-- Allow flexible reservation windows (time range + best available)
+- Expand Shared Signals: store more restaurant facts (e.g., wait time now with short TTL, dietary notes) and optionally use Place ID for more reliable identity
 
-- Add Supabase Auth and migrate session calls to users across devices
+- Allow flexible reservation windows (time range + best available)
 
 - Realtime updates (websockets or Supabase realtime)
 
@@ -363,6 +389,7 @@ This contains optional “extra questions” beyond the reservation booking. Exa
 
 This MVP is intentionally structured so future scope is additive:
 
-- **Google Places restaurant selection (Autocomplete + Near me):** the app’s “restaurant selection” produces `restaurant_name` + `restaurant_phone_e164`. Places selection should populate the same fields; future optional metadata fields (place_id/address/lat/lng) can be added later without changing the core call flow.`
+- **Google Places restaurant selection (Autocomplete + Near me):** the app’s “restaurant selection” produces `restaurant_name` + `restaurant_phone_e164`. Places selection should populate the same fields; future optional metadata fields (place_id/address/lat/lng) can be added later without changing the core call flow.
 - **Flexible reservation window:** reservation requests are stored in dedicated `reservation_*` fields, and outcomes are stored in `reservation_result_json`. Adding a time range later can be done by introducing optional window fields while keeping the same extraction + dashboard flow (the agent books the best available time and the chosen time is reflected in `reservation_result_json` and `answers_json.reservation`).
-- **Full auth:** the schema already includes `user_id` alongside `session_id`. Supabase Auth can be added by scoping reads to `user_id` and migrating existing session calls to a user upon login.
+- **Shared Signals:** after extraction, the server can publish a small allowlisted set of answers (hours_today, takes_reservations) keyed by restaurant_phone_e164 for other users to see. Never share transcripts, reservation details, or caller PII.
+- **Auth (later):** could be added in the future by scoping history to user_id, but MVP remains session-only.
