@@ -150,14 +150,49 @@ function getReservationStatusBadgeVariant(
   }
 }
 
+// Call status label mapping - always includes "Call:" prefix
+function getCallStatusLabel(status: string): string {
+  switch (status) {
+    case "queued":
+      return "Call: Queued";
+    case "calling":
+      return "Call: Calling";
+    case "connected":
+      return "Call: Connected";
+    case "completed":
+      return "Call: Completed";
+    case "failed":
+      return "Call: Failed";
+    default:
+      return "Call: Unknown";
+  }
+}
+
+// Reservation status label mapping - includes "Reservation:" prefix
 function getReservationStatusLabel(status: string | null): string {
+  switch (status) {
+    case "confirmed":
+      return "Reservation: Confirmed";
+    case "failed":
+      return "Reservation: Failed";
+    case "needs_followup":
+      return "Reservation: Needs follow-up";
+    case "requested":
+      return "Reservation: Requested";
+    default:
+      return "Reservation: Unknown";
+  }
+}
+
+// Short reservation status label for detail view (without prefix)
+function getReservationStatusLabelShort(status: string | null): string {
   switch (status) {
     case "confirmed":
       return "Confirmed";
     case "failed":
       return "Failed";
     case "needs_followup":
-      return "Needs Follow-up";
+      return "Needs follow-up";
     case "requested":
       return "Requested";
     default:
@@ -584,7 +619,7 @@ export default function CallsClient() {
                     </div>
                     <div className="flex flex-col items-end gap-1">
                       <Badge variant={getStatusBadgeVariant(call.status)}>
-                        {call.status}
+                        {getCallStatusLabel(call.status)}
                       </Badge>
                       {call.call_intent === "make_reservation" && call.reservation_status && (
                         <Badge 
@@ -599,7 +634,7 @@ export default function CallsClient() {
                           variant="outline"
                           className="text-xs"
                         >
-                          Questions only
+                          Mode: Questions only
                         </Badge>
                       )}
                     </div>
@@ -753,7 +788,7 @@ export default function CallsClient() {
                         variant={getReservationStatusBadgeVariant(callDetail.reservation_status)}
                         className="text-sm"
                       >
-                        {getReservationStatusLabel(callDetail.reservation_status)}
+                        {getReservationStatusLabelShort(callDetail.reservation_status)}
                       </Badge>
                     )}
                   </div>
