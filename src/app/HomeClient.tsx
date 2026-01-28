@@ -171,9 +171,14 @@ export default function HomeClient() {
   const [customQuestions, setCustomQuestions] = useState<string[]>([""]);
   const [error, setError] = useState<string | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [submitted, setSubmitted] = useState(false);
 
   // Form interaction state for validation UX
   const [touched, setTouched] = useState<Record<string, boolean>>({});
+
+  // Refs for scroll-to-section functionality
+  const restaurantCardRef = useRef<HTMLDivElement>(null);
+  const questionsCardRef = useRef<HTMLDivElement>(null);
   const [submitAttempted, setSubmitAttempted] = useState(false);
 
   // Google Places state
@@ -630,6 +635,9 @@ export default function HomeClient() {
         return;
       }
 
+      // Mark as submitted for immediate UI feedback before navigation
+      setSubmitted(true);
+
       // Navigate to /calls with the new call selected
       router.push(`/calls?selected=${data.call_id}`);
     } catch {
@@ -716,6 +724,66 @@ export default function HomeClient() {
   // Form is valid when there are no disabled reasons
   const isFormValid = disabledReasons.length === 0;
 
+  // ─────────────────────────────────────────────────────────────────────────────
+  // Stepper State Computation
+  // ─────────────────────────────────────────────────────────────────────────────
+  
+  // Step 1: Restaurant is complete when phone is valid
+  const restaurantComplete = useMemo(() => {
+    return isPhoneValid(restaurantCountryCode, restaurantNationalNumber);
+  }, [restaurantCountryCode, restaurantNationalNumber]);
+
+  // Step 2: Questions are complete when:
+  // - All required reservation fields are valid (if call_intent=make_reservation)
+  // - questions_json passes validation (dietary restriction present if enabled)
+  const questionsComplete = useMemo(() => {
+    // Check reservation fields if making a reservation
+    if (callIntent === "make_reservation") {
+      if (!reservationDate) return false;
+      if (!reservationTime) return false;
+      if (!reservationPartySize || reservationPartySize < 1 || reservationPartySize > 20) return false;
+      if (!reservationName.trim()) return false;
+      if (!isPhoneValid(reservationCountryCode, reservationNationalNumber)) return false;
+    } else {
+      // For questions_only, need at least 1 question
+      if (totalQuestions === 0) return false;
+    }
+    
+    // Check dietary restriction is filled if enabled
+    if (presets.dietary_options.enabled && !presets.dietary_options.restriction.trim()) {
+      return false;
+    }
+    
+    return true;
+  }, [
+    callIntent,
+    reservationDate,
+    reservationTime,
+    reservationPartySize,
+    reservationName,
+    reservationCountryCode,
+    reservationNationalNumber,
+    totalQuestions,
+    presets.dietary_options.enabled,
+    presets.dietary_options.restriction,
+  ]);
+
+  // Derive active step index: 0 = Restaurant, 1 = Questions, 2 = Results
+  const activeStepIndex = useMemo(() => {
+    if (!restaurantComplete) return 0;
+    if (!questionsComplete) return 1;
+    return 2; // Ready to submit
+  }, [restaurantComplete, questionsComplete]);
+
+  // Scroll to section handlers
+  const scrollToRestaurant = useCallback(() => {
+    restaurantCardRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+  }, []);
+
+  const scrollToQuestions = useCallback(() => {
+    questionsCardRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+  }, []);
+
   return (
     <>
       <EmojiBackground />
@@ -762,28 +830,114 @@ export default function HomeClient() {
       {/* Stepper */}
       <div className="flex justify-center mb-8">
         <div className="flex items-center gap-3">
-          {/* Step 1 */}
-          <div className="flex items-center gap-2">
-            <div className="flex items-center justify-center size-8 rounded-full bg-primary text-primary-foreground">
-              <CheckCircle2 className="size-5" />
+          {/* Step 1: Restaurant */}
+          <button
+            type="button"
+            onClick={scrollToRestaurant}
+            className="flex items-center gap-2 group cursor-pointer"
+          >
+            <div
+              className={`flex items-center justify-center size-8 rounded-full transition-colors ${
+                restaurantComplete
+                  ? "bg-primary text-primary-foreground"
+                  : activeStepIndex === 0
+                    ? "bg-primary text-primary-foreground"
+                    : "border-2 border-border bg-background text-muted-foreground"
+              }`}
+            >
+              {restaurantComplete ? (
+                <CheckCircle2 className="size-5" />
+              ) : activeStepIndex === 0 ? (
+                <span className="text-sm font-semibold">1</span>
+              ) : (
+                <Circle className="size-4" />
+              )}
             </div>
-            <span className="text-sm font-medium text-foreground">Restaurant</span>
-          </div>
-          <div className="w-8 h-0.5 bg-primary" />
-          {/* Step 2 */}
-          <div className="flex items-center gap-2">
-            <div className="flex items-center justify-center size-8 rounded-full bg-primary text-primary-foreground">
-              <CheckCircle2 className="size-5" />
+            <span
+              className={`text-sm font-medium transition-colors group-hover:text-primary ${
+                restaurantComplete || activeStepIndex === 0
+                  ? "text-foreground"
+                  : "text-muted-foreground"
+              }`}
+            >
+              Restaurant
+            </span>
+          </button>
+          
+          <div
+            className={`w-8 h-0.5 transition-colors ${
+              restaurantComplete ? "bg-primary" : "bg-border"
+            }`}
+          />
+          
+          {/* Step 2: Questions */}
+          <button
+            type="button"
+            onClick={scrollToQuestions}
+            className="flex items-center gap-2 group cursor-pointer"
+          >
+            <div
+              className={`flex items-center justify-center size-8 rounded-full transition-colors ${
+                questionsComplete
+                  ? "bg-primary text-primary-foreground"
+                  : activeStepIndex === 1
+                    ? "bg-primary text-primary-foreground"
+                    : "border-2 border-border bg-background text-muted-foreground"
+              }`}
+            >
+              {questionsComplete ? (
+                <CheckCircle2 className="size-5" />
+              ) : activeStepIndex === 1 ? (
+                <span className="text-sm font-semibold">2</span>
+              ) : (
+                <Circle className="size-4" />
+              )}
             </div>
-            <span className="text-sm font-medium text-foreground">Questions</span>
-          </div>
-          <div className="w-8 h-0.5 bg-border" />
-          {/* Step 3 */}
+            <span
+              className={`text-sm font-medium transition-colors group-hover:text-primary ${
+                questionsComplete || activeStepIndex === 1
+                  ? "text-foreground"
+                  : "text-muted-foreground"
+              }`}
+            >
+              Questions
+            </span>
+          </button>
+          
+          <div
+            className={`w-8 h-0.5 transition-colors ${
+              questionsComplete ? "bg-primary" : "bg-border"
+            }`}
+          />
+          
+          {/* Step 3: Results */}
           <div className="flex items-center gap-2">
-            <div className="flex items-center justify-center size-8 rounded-full border-2 border-border bg-background text-muted-foreground">
-              <Circle className="size-4" />
+            <div
+              className={`flex items-center justify-center size-8 rounded-full transition-colors ${
+                submitted
+                  ? "bg-primary text-primary-foreground"
+                  : activeStepIndex === 2
+                    ? "bg-primary text-primary-foreground"
+                    : "border-2 border-border bg-background text-muted-foreground"
+              }`}
+            >
+              {submitted ? (
+                <CheckCircle2 className="size-5" />
+              ) : activeStepIndex === 2 ? (
+                <span className="text-sm font-semibold">3</span>
+              ) : (
+                <Circle className="size-4" />
+              )}
             </div>
-            <span className="text-sm font-medium text-muted-foreground">Results</span>
+            <span
+              className={`text-sm font-medium ${
+                submitted || activeStepIndex === 2
+                  ? "text-foreground"
+                  : "text-muted-foreground"
+              }`}
+            >
+              Results
+            </span>
           </div>
         </div>
       </div>
@@ -794,7 +948,7 @@ export default function HomeClient() {
           {/* Left Column - Form */}
           <div className="space-y-6">
             {/* Restaurant Card */}
-            <Card className="shadow-md">
+            <Card ref={restaurantCardRef} className="shadow-md scroll-mt-6">
               <CardContent className="pt-6">
                 <div className="flex items-center gap-2 mb-4">
                   <Phone className="size-5 text-primary" />
@@ -1010,7 +1164,7 @@ export default function HomeClient() {
             </Card>
 
             {/* Call Intent Toggle */}
-            <Card className={`shadow-md transition-all duration-200 ${
+            <Card ref={questionsCardRef} className={`shadow-md transition-all duration-200 scroll-mt-6 ${
               callIntent === "make_reservation" ? "ring-2 ring-primary/20" : ""
             }`}>
               <CardContent className="pt-5 pb-5">
