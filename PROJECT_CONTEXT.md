@@ -830,7 +830,11 @@ Environment variables:
 
 - The agent MUST ask one at a time, skip irrelevant steps when earlier answers make later steps impossible (e.g., do not attempt booking if they do not take reservations), and end politely.
 
-- **`formatted_datetime_local` format:** `formatted_datetime_local` must always be an explicit calendar date + time (e.g., "Tue, Jan 27 at 7:00 PM"). Do NOT use relative words like "today" or "tomorrow". This is formatted from `reservation_datetime_local_iso` + `reservation_timezone`.
+- **`formatted_datetime_local` format:** `formatted_datetime_local` must always be an explicit calendar date + time using FULL weekday and month names (e.g., "Tuesday, January 27 at 7:00 PM"). Do NOT use abbreviations ("Tue", "Jan") or relative words like "today" or "tomorrow". This string is TTS-optimized and must be spoken exactly as written. This is formatted from `reservation_datetime_local_iso` + `reservation_timezone`.
+
+- **No abbreviations rule:** The agent MUST read `formatted_datetime_local` exactly as provided — no abbreviating weekday or month names. Example: say "Wednesday, January 28 at 7:00 PM" not "Wed" or "Jan".
+
+- **Time unavailability rule:** If the restaurant says the exact requested time is NOT available, the agent MUST NOT ask hypothetical follow-up questions (e.g., "If that time were available, would you..."). Instead, the agent must immediately stop the booking sequence and proceed to any remaining questions, or end the call politely if none remain. Booking steps (name, callback phone, confirm details) should only continue if the restaurant confirms the exact requested time IS available.
 
 - **Callback phone formatting for TTS:** Callback phone must be spoken digit-by-digit with pauses (e.g., "6 4 7, 5 5 5, 0 0 0 0") to prevent TTS reading chunks as "six hundred...". For +1 (US/Canada) numbers, omit "+" and country code, then space each digit with commas between groups (area code, prefix, line number). For other international numbers, remove "+" and speak digit-by-digit with commas every 3-4 digits.
 

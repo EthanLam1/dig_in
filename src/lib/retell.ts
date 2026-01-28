@@ -108,8 +108,13 @@ export function buildQuestionsToAsk(params: {
     // B) Booking sequence (always after gatekeepers)
     // ─────────────────────────────────────────────────────────────────────────
     const formattedDateTime = formatDateTimeForAgent(params.reservation_datetime_local_iso!, params.reservation_timezone!);
+    
+    // Add TTS instruction for datetime - read exactly as written, no abbreviations
+    lines.push(`[INSTRUCTION: Read the following date and time EXACTLY as written. Do not abbreviate or rephrase any part of it.]`);
     lines.push(`I'd like to make a reservation for ${params.reservation_party_size}.`);
     lines.push(`I can only do ${formattedDateTime} — is that exact time available?`);
+    // Add booking flow guard - if time unavailable, stop booking immediately
+    lines.push(`[INSTRUCTION: If the restaurant says the exact time is NOT available, do NOT ask any hypothetical questions like "if it were available..." or continue with booking steps. Instead, politely acknowledge and immediately skip to any remaining questions below, or end the call politely if none remain.]`);
     lines.push(`Can I book it under the name ${params.reservation_name}?`);
     // Format phone for TTS: grouped digits with pauses, no "+" or country code for +1
     const spokenCallbackPhone = formatPhoneForTTS(params.reservation_phone_e164!);
@@ -218,25 +223,26 @@ function formatPhoneForTTS(phoneE164: string): string {
 /**
  * Formats a local ISO datetime string for human-readable speech.
  * Always uses explicit calendar date + time (no relative terms like "today" or "tomorrow").
- * e.g., "2026-01-27T19:00:00" -> "Tue, Jan 27 at 7:00 PM"
+ * Uses FULL weekday and month names (never abbreviations) for TTS clarity.
+ * e.g., "2026-01-27T19:00:00" -> "Tuesday, January 27 at 7:00 PM"
  */
 function formatDateTimeForAgent(datetimeLocalIso: string, timezone: string): string {
   try {
     // Parse the datetime and format it in the specified timezone
     const date = new Date(datetimeLocalIso);
     
-    // Format with explicit weekday, month, and day - never use relative terms
+    // Format with explicit FULL weekday, FULL month, and day - never use abbreviations or relative terms
     const dateTimeOptions: Intl.DateTimeFormatOptions = {
       timeZone: timezone,
-      weekday: "short",
-      month: "short",
+      weekday: "long",  // "Tuesday" not "Tue"
+      month: "long",    // "January" not "Jan"
       day: "numeric",
       hour: "numeric",
       minute: "2-digit",
       hour12: true,
     };
     
-    // Format as "Tue, Jan 27, 7:00 PM" then adjust to "Tue, Jan 27 at 7:00 PM"
+    // Format as "Tuesday, January 27, 7:00 PM" then adjust to "Tuesday, January 27 at 7:00 PM"
     const parts = new Intl.DateTimeFormat("en-US", dateTimeOptions).formatToParts(date);
     
     const weekday = parts.find((p) => p.type === "weekday")?.value || "";
@@ -246,7 +252,7 @@ function formatDateTimeForAgent(datetimeLocalIso: string, timezone: string): str
     const minute = parts.find((p) => p.type === "minute")?.value || "";
     const dayPeriod = parts.find((p) => p.type === "dayPeriod")?.value || "";
     
-    // Build: "Tue, Jan 27 at 7:00 PM"
+    // Build: "Tuesday, January 27 at 7:00 PM"
     return `${weekday}, ${month} ${day} at ${hour}:${minute} ${dayPeriod}`;
   } catch {
     // Fallback to raw string if parsing fails
