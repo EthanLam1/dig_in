@@ -276,7 +276,6 @@ export default function HomeClient() {
   // ─────────────────────────────────────────────────────────────────────────
   const [signalsItems, setSignalsItems] = useState<SignalItem[]>([]);
   const [signalsLoading, setSignalsLoading] = useState(false);
-  const [userDecisionSkipHours, setUserDecisionSkipHours] = useState<boolean | null>(null);
   const signalsDebounceRef = useRef<NodeJS.Timeout | null>(null);
   const lastFetchedPhoneRef = useRef<string | null>(null);
 
@@ -337,7 +336,6 @@ export default function HomeClient() {
     if (!isPhoneE164Valid) {
       setSignalsItems([]);
       setSignalsLoading(false);
-      setUserDecisionSkipHours(null);
       lastFetchedPhoneRef.current = null;
       return;
     }
@@ -346,9 +344,6 @@ export default function HomeClient() {
     if (lastFetchedPhoneRef.current === currentPhoneE164) {
       return;
     }
-
-    // Reset user decision when phone changes
-    setUserDecisionSkipHours(null);
 
     // Debounce the fetch
     signalsDebounceRef.current = setTimeout(async () => {
@@ -1296,6 +1291,57 @@ export default function HomeClient() {
               </CardContent>
             </Card>
 
+            {/* Recent Info from Dig In - Signals Card (positioned above booking) */}
+            {isPhoneE164Valid && (
+              <Card className="shadow-md border-primary/30 bg-white">
+                <CardContent className="pt-5 pb-5">
+                  <div className="flex items-center gap-2 mb-1">
+                    <Info className="size-4 text-primary" />
+                    <h3 className="text-sm font-semibold text-primary">Recent info from Dig In</h3>
+                  </div>
+                  <p className="text-xs text-muted-foreground mb-3">
+                    Based on what someone heard on a recent call.
+                  </p>
+                  
+                  {signalsLoading ? (
+                    <div className="flex items-center gap-2 text-sm text-muted-foreground">
+                      <Loader2 className="size-4 animate-spin" />
+                      <span>Loading recent info...</span>
+                    </div>
+                  ) : signalsItems.length === 0 ? (
+                    <p className="text-sm text-muted-foreground">
+                      No recent information for this restaurant yet.
+                    </p>
+                  ) : (
+                    <div className="space-y-3">
+                      {signalsItems.map((signal, index) => {
+                        const isHoursToday = signal.signal_type === "hours_today";
+                        const isTakesReservations = signal.signal_type === "takes_reservations";
+                        
+                        return (
+                          <div key={index} className="space-y-1">
+                            <div className="flex items-start justify-between gap-2">
+                              <div>
+                                <span className="text-sm font-medium">
+                                  {isHoursToday ? "Hours today" : isTakesReservations ? "Takes reservations" : signal.signal_type}
+                                </span>
+                                <p className="text-sm italic text-muted-foreground border-l-2 border-muted-foreground/30 pl-2 mt-0.5">
+                                  &ldquo;{signal.signal_value_text}&rdquo;
+                                </p>
+                                <p className="text-xs text-muted-foreground mt-1">
+                                  Last updated {formatRelativeTime(signal.observed_at)}
+                                </p>
+                              </div>
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
+                </CardContent>
+              </Card>
+            )}
+
             {/* Call Intent Toggle */}
             <Card ref={questionsCardRef} className={`shadow-md transition-all duration-200 scroll-mt-6 ${
               callIntent === "make_reservation" ? "ring-2 ring-primary/20" : ""
@@ -1517,89 +1563,6 @@ export default function HomeClient() {
                 </div>
               </CardContent>
             </Card>
-            )}
-
-            {/* Recent Info from Dig In - Signals Card */}
-            {(signalsLoading || signalsItems.length > 0) && (
-              <Card className="shadow-md border-primary/20 bg-primary/5">
-                <CardContent className="pt-5 pb-5">
-                  <div className="flex items-center gap-2 mb-3">
-                    <Info className="size-4 text-primary" />
-                    <h3 className="text-sm font-semibold text-primary">Recent info from Dig In</h3>
-                  </div>
-                  
-                  {signalsLoading ? (
-                    <div className="flex items-center gap-2 text-sm text-muted-foreground">
-                      <Loader2 className="size-4 animate-spin" />
-                      <span>Loading recent info...</span>
-                    </div>
-                  ) : (
-                    <div className="space-y-3">
-                      {signalsItems.map((signal, index) => {
-                        const isHoursToday = signal.signal_type === "hours_today";
-                        const isTakesReservations = signal.signal_type === "takes_reservations";
-                        
-                        return (
-                          <div key={index} className="space-y-1">
-                            <div className="flex items-start justify-between gap-2">
-                              <div>
-                                <span className="text-sm font-medium">
-                                  {isHoursToday ? "Hours today" : isTakesReservations ? "Takes reservations" : signal.signal_type}
-                                </span>
-                                <p className="text-sm text-foreground">
-                                  {signal.signal_value_text}
-                                </p>
-                                <p className="text-xs text-muted-foreground">
-                                  Last updated {formatRelativeTime(signal.observed_at)}
-                                </p>
-                              </div>
-                            </div>
-                            
-                            {/* Skip asking prompt for hours_today */}
-                            {isHoursToday && userDecisionSkipHours === null && (
-                              <div className="mt-2 p-2 bg-background rounded-md border border-border">
-                                <p className="text-sm text-muted-foreground mb-2">
-                                  We already have recent hours — skip asking?
-                                </p>
-                                <div className="flex gap-2">
-                                  <Button
-                                    type="button"
-                                    variant="outline"
-                                    size="sm"
-                                    onClick={() => {
-                                      setUserDecisionSkipHours(true);
-                                      setPresets((prev) => ({ ...prev, hours_today: false }));
-                                    }}
-                                  >
-                                    Skip
-                                  </Button>
-                                  <Button
-                                    type="button"
-                                    variant="outline"
-                                    size="sm"
-                                    onClick={() => {
-                                      setUserDecisionSkipHours(false);
-                                    }}
-                                  >
-                                    Ask anyway
-                                  </Button>
-                                </div>
-                              </div>
-                            )}
-                            
-                            {/* Show decision feedback */}
-                            {isHoursToday && userDecisionSkipHours === true && (
-                              <p className="text-xs text-muted-foreground mt-1 italic">
-                                Skipped — won&apos;t ask about hours
-                              </p>
-                            )}
-                          </div>
-                        );
-                      })}
-                    </div>
-                  )}
-                </CardContent>
-              </Card>
             )}
 
             {/* Preset Questions Section */}
