@@ -10,15 +10,6 @@ import { extractAnswers } from "@/lib/extractAnswers";
 // Status progression order (forward-only updates)
 const STATUS_ORDER = ["queued", "calling", "connected", "completed", "failed"];
 
-// Disconnection reasons indicating no human was reached
-// See Retell docs: https://docs.retellai.com/api-references/list-calls
-const NO_HUMAN_REACHED_REASONS = new Set([
-  "voicemail_reached",
-  "dial_no_answer",
-  "dial_busy",
-  "dial_failed",
-]);
-
 // Voicemail transcript heuristics (case-insensitive)
 const VOICEMAIL_PHRASES = [
   "forwarded to voicemail",
@@ -28,12 +19,15 @@ const VOICEMAIL_PHRASES = [
 ];
 
 /**
- * Detects if a call hit voicemail or no answer using:
- * 1. Primary: call_analysis.in_voicemail
- * 2. Secondary: call_analysis.call_successful === false + transcript voicemail phrases
- * 3. Fallback: transcript heuristics if call_analysis is missing
+ * Detects if a call went to voicemail using:
+ * 1. Primary: call_analysis.in_voicemail === true
+ * 2. Secondary: transcript contains voicemail phrases (case-insensitive)
+ *
+ * IMPORTANT: We do NOT use call_analysis.call_successful === false here.
+ * A call can be "unsuccessful" (e.g., reservation denied) but still have
+ * reached a human - that's a completed call, not a failed call.
  */
-function isVoicemailOrNoAnswer(
+function detectVoicemailFromAnalysis(
   callAnalysis: { in_voicemail?: boolean; call_successful?: boolean } | undefined | null,
   transcript: string | undefined | null
 ): boolean {
@@ -42,20 +36,67 @@ function isVoicemailOrNoAnswer(
     return true;
   }
 
-  // Secondary check: call not successful + voicemail phrases in transcript
-  if (callAnalysis?.call_successful === false && transcript) {
+  // Secondary check: voicemail phrases in transcript
+  if (transcript) {
     const lowerTranscript = transcript.toLowerCase();
     if (VOICEMAIL_PHRASES.some((phrase) => lowerTranscript.includes(phrase))) {
       return true;
     }
   }
 
-  // Fallback: transcript heuristics if call_analysis is missing
-  if (!callAnalysis && transcript) {
-    const lowerTranscript = transcript.toLowerCase();
-    if (VOICEMAIL_PHRASES.some((phrase) => lowerTranscript.includes(phrase))) {
+  return false;
+}
+
+/**
+ * Detects if disconnection reason indicates no human was reached.
+ * Checks for:
+ * - "voicemail_reached" (exact match)
+ * - Any reason starting with "dial_" (dial_failed, dial_busy, dial_no_answer, etc.)
+ */
+function isDialFailureDisconnection(disconnectionReason: string | undefined | null): boolean {
+  if (!disconnectionReason) return false;
+  return (
+    disconnectionReason === "voicemail_reached" ||
+    disconnectionReason.startsWith("dial_")
+  );
+}
+
+/**
+ * Detects if a human actually answered the call.
+ * Signals that strongly imply "human answered":
+ * - transcript includes both "Agent:" and "User:" lines with real content
+ * - transcript_object has multiple entries with content
+ * - duration_ms is non-trivial (> 5000ms)
+ */
+function detectHumanAnswered(
+  transcript: string | undefined | null,
+  transcriptObject: unknown,
+  durationMs: number | undefined | null
+): boolean {
+  // Check transcript for dialogue pattern
+  if (transcript) {
+    const hasAgent = /agent:/i.test(transcript);
+    const hasUser = /user:/i.test(transcript);
+    // Check for real content (not just empty turns)
+    const hasRealContent = transcript.length > 50; // Arbitrary threshold for "real content"
+    if (hasAgent && hasUser && hasRealContent) {
       return true;
     }
+  }
+
+  // Check transcript_object for multiple entries with content
+  if (Array.isArray(transcriptObject) && transcriptObject.length > 1) {
+    const entriesWithContent = transcriptObject.filter(
+      (entry: { content?: string }) => entry?.content && entry.content.trim().length > 0
+    );
+    if (entriesWithContent.length > 1) {
+      return true;
+    }
+  }
+
+  // Check duration (> 5000ms suggests a real conversation)
+  if (durationMs && durationMs > 5000) {
+    return true;
   }
 
   return false;
@@ -113,6 +154,7 @@ export async function POST(request: NextRequest) {
       transcript?: string;
       transcript_object?: unknown;
       disconnection_reason?: string;
+      duration_ms?: number;
       call_analysis?: {
         in_voicemail?: boolean;
         call_successful?: boolean;
@@ -144,7 +186,7 @@ export async function POST(request: NextRequest) {
   const supabase = getSupabaseAdmin();
   const { data: callRow, error: fetchError } = await supabase
     .from("calls")
-    .select("id, status, is_extracting")
+    .select("id, status, is_extracting, call_intent, reservation_status")
     .eq("provider_call_id", providerCallId)
     .single();
 
@@ -159,70 +201,88 @@ export async function POST(request: NextRequest) {
   const callId = callRow.id;
   const currentStatus = callRow.status;
   const currentIsExtracting = callRow.is_extracting;
+  const callIntent = callRow.call_intent;
+  const currentReservationStatus = callRow.reservation_status;
 
-  // 6.5. Extract voicemail detection info early (needed for idempotency check)
+  // 6.5. Extract voicemail/human detection info early (needed for idempotency check)
   const callAnalysis = call.call_analysis;
   const transcriptText = call.transcript ?? null;
-  const detectedVoicemail = isVoicemailOrNoAnswer(callAnalysis, transcriptText);
+  const transcriptObject = call.transcript_object;
+  const durationMs = call.duration_ms;
+  const disconnectionReason = call.disconnection_reason;
 
-  // 6.6. Idempotency check: if call is already terminal, short-circuit
+  // Detect voicemail from call_analysis or transcript phrases
+  const detectedVoicemail = detectVoicemailFromAnalysis(callAnalysis, transcriptText);
+  
+  // Detect dial failures (dial_*, voicemail_reached)
+  const isDialFailure = isDialFailureDisconnection(disconnectionReason);
+  
+  // Detect if a human actually answered
+  const humanAnswered = detectHumanAnswered(transcriptText, transcriptObject, durationMs);
+
+  // Determine if no human was reached:
+  // noHumanReached = voicemail OR dial failure
+  // BUT if humanAnswered signals are strong, don't mark as noHumanReached
+  // This handles edge cases where voicemail detection might be wrong but we have clear conversation
+  const noHumanReached = (detectedVoicemail || isDialFailure) && !humanAnswered;
+
+  // 6.6. Idempotency check with call_analyzed override capability
   // A call is terminal if status is 'completed' or 'failed' AND is_extracting is false
-  // Retell can retry/duplicate webhooks, so we skip processing for already-finished calls
-  // EXCEPTION: allow call_analyzed to override completed status if voicemail is detected
+  // EXCEPTION: call_analyzed can override earlier call_ended mistakes:
+  //   - If noHumanReached true → force failed
+  //   - If noHumanReached false and current is failed → force completed and run extraction
   const isTerminal =
     (currentStatus === "completed" || currentStatus === "failed") &&
     !currentIsExtracting;
 
-  const shouldAllowVoicemailOverride =
+  // Allow call_analyzed to correct call_ended mistakes
+  const shouldAllowCallAnalyzedOverride =
     event === "call_analyzed" &&
-    detectedVoicemail &&
-    currentStatus === "completed";
+    (
+      // Case 1: Voicemail detected but status is completed → correct to failed
+      (noHumanReached && currentStatus === "completed") ||
+      // Case 2: Human answered but status is failed → correct to completed
+      (!noHumanReached && currentStatus === "failed")
+    );
 
-  if (isTerminal && !shouldAllowVoicemailOverride) {
+  if (isTerminal && !shouldAllowCallAnalyzedOverride) {
     console.log(
       `[Retell Webhook] Call ${callId} is already terminal (status=${currentStatus}), skipping duplicate event`
     );
     return new NextResponse(null, { status: 200 });
   }
 
-  if (shouldAllowVoicemailOverride) {
-    console.log(
-      `[Retell Webhook] Call ${callId} was completed but voicemail detected in call_analyzed, overriding to failed`
-    );
+  if (shouldAllowCallAnalyzedOverride) {
+    if (noHumanReached && currentStatus === "completed") {
+      console.log(
+        `[Retell Webhook] Call ${callId} was completed but voicemail detected in call_analyzed, correcting to failed`
+      );
+    } else if (!noHumanReached && currentStatus === "failed") {
+      console.log(
+        `[Retell Webhook] Call ${callId} was failed but human answered in call_analyzed, correcting to completed`
+      );
+    }
   }
 
-  // 7. Extract disconnection_reason from payload (for call_ended events)
-  const disconnectionReason = call.disconnection_reason;
+  // 7. Prepare detection results for logging and decision-making
   const hasTranscript = !!(call.transcript || call.transcript_object);
 
-  // Check if this is a "no human reached" scenario from call_ended disconnection_reason
-  const isNoHumanReachedFromDisconnection =
-    event === "call_ended" &&
-    disconnectionReason &&
-    NO_HUMAN_REACHED_REASONS.has(disconnectionReason);
-
-  // Check if this is a voicemail scenario from call_analyzed (using call_analysis + transcript)
-  const isVoicemailFromCallAnalyzed =
-    event === "call_analyzed" && detectedVoicemail;
-
-  // Combined check: either disconnection reason OR voicemail detection
-  const isNoHumanReached =
-    isNoHumanReachedFromDisconnection || isVoicemailFromCallAnalyzed;
-
-  // Also check for voicemail on call_ended using transcript heuristics (safety guard)
-  const isVoicemailFromCallEnded =
-    event === "call_ended" && detectedVoicemail;
-
-  // Log disconnection reason for debugging
-  if (event === "call_ended" && disconnectionReason) {
+  // Log detection results for debugging
+  if (event === "call_ended" || event === "call_analyzed") {
     console.log(
-      `[Retell Webhook] Call ${callId} ended with disconnection_reason: ${disconnectionReason}`
-    );
-  }
-
-  if (isVoicemailFromCallAnalyzed) {
-    console.log(
-      `[Retell Webhook] Call ${callId} voicemail detected from call_analyzed (in_voicemail=${callAnalysis?.in_voicemail}, call_successful=${callAnalysis?.call_successful})`
+      `[Retell Webhook] Call ${callId} detection results:`,
+      JSON.stringify({
+        event,
+        disconnectionReason,
+        detectedVoicemail,
+        isDialFailure,
+        humanAnswered,
+        noHumanReached,
+        hasTranscript,
+        durationMs,
+        inVoicemail: callAnalysis?.in_voicemail,
+        callSuccessful: callAnalysis?.call_successful,
+      })
     );
   }
 
@@ -243,29 +303,60 @@ export async function POST(request: NextRequest) {
     if (callAnalysis?.call_successful !== undefined) {
       details.call_successful = callAnalysis.call_successful;
     }
+    if (durationMs !== undefined) {
+      details.duration_ms = durationMs;
+    }
+    details.human_answered_detection = humanAnswered;
     return JSON.stringify(details);
   };
 
-  // 9. Handle different scenarios
-  if (isNoHumanReached || isVoicemailFromCallEnded) {
-    // No human was reached (voicemail, no answer, busy, dial failed)
+  // 9. Handle different scenarios based on noHumanReached vs humanAnswered
+  //
+  // KEY DISTINCTION:
+  // - noHumanReached = true → calls.status = 'failed', skip extraction
+  // - noHumanReached = false (human answered) → calls.status = 'completed', run extraction
+  //
+  // We do NOT use call_analysis.call_successful to determine failed vs completed.
+  // A call where a human answered but the reservation was denied is still 'completed'.
+  
+  if (noHumanReached) {
+    // No human was reached (voicemail, dial failure)
     // Mark as failed and skip extraction
     callUpdates.status = "failed";
     callUpdates.is_extracting = false;
-    callUpdates.failure_reason = "Your phone call was not answered";
+    
+    // Set appropriate failure message
+    if (detectedVoicemail) {
+      callUpdates.failure_reason = "The call went to voicemail.";
+    } else {
+      callUpdates.failure_reason = "Your phone call was not answered";
+    }
     callUpdates.failure_details = buildFailureDetails();
 
-    const reason = isVoicemailFromCallAnalyzed
-      ? "voicemail detected in call_analyzed"
-      : isVoicemailFromCallEnded
-      ? "voicemail detected in call_ended"
-      : `disconnection: ${disconnectionReason}`;
+    // For make_reservation calls, update reservation_status so it doesn't stay stuck at 'requested'
+    if (callIntent === "make_reservation" && currentReservationStatus === "requested") {
+      callUpdates.reservation_status = "needs_followup";
+      callUpdates.reservation_result_json = {
+        failure_category: "call_back_later",
+        failure_reason: detectedVoicemail 
+          ? "Call went to voicemail"
+          : "Call was not answered",
+      };
+      console.log(
+        `[Retell Webhook] Call ${callId} reservation_status updated to needs_followup (voicemail/no answer)`
+      );
+    }
+
+    const reason = detectedVoicemail
+      ? `voicemail detected (in_voicemail=${callAnalysis?.in_voicemail}, transcript_phrases=${detectedVoicemail && !callAnalysis?.in_voicemail})`
+      : `dial failure: ${disconnectionReason}`;
 
     console.log(
       `[Retell Webhook] Call ${callId} marked as failed: no human reached (${reason})`
     );
   } else {
-    // Normal status progression
+    // Human answered OR conversation happened
+    // Mark as completed and proceed with extraction
     let newStatus: string | null = null;
 
     switch (event) {
@@ -274,6 +365,7 @@ export async function POST(request: NextRequest) {
         break;
       case "call_ended":
       case "call_analyzed":
+        // Human answered = completed, regardless of call_successful
         newStatus = "completed";
         break;
       default:
@@ -290,6 +382,9 @@ export async function POST(request: NextRequest) {
       if (hasTranscript) {
         // Set is_extracting=true to signal that extraction should happen
         callUpdates.is_extracting = true;
+        console.log(
+          `[Retell Webhook] Call ${callId} marked as completed (human answered), will run extraction`
+        );
       } else {
         // No transcript available - mark as not extracting with failure reason
         callUpdates.is_extracting = false;
@@ -341,12 +436,11 @@ export async function POST(request: NextRequest) {
   }
 
   // 12. Run extraction on call_analyzed (preferred) or call_ended if transcript exists
-  // IMPORTANT: Skip extraction for "no human reached" or voicemail scenarios
-  const shouldSkipExtraction = isNoHumanReached || isVoicemailFromCallEnded;
-
-  if (shouldSkipExtraction) {
+  // IMPORTANT: Skip extraction for "no human reached" scenarios
+  
+  if (noHumanReached) {
     console.log(
-      `[Retell Webhook] Skipping extraction for call ${callId} (no human reached / voicemail)`
+      `[Retell Webhook] Skipping extraction for call ${callId} (no human reached)`
     );
 
     // Clear answers_json if it was already written (idempotency: voicemail detected after extraction ran)
@@ -362,22 +456,43 @@ export async function POST(request: NextRequest) {
       );
     } else {
       console.log(
-        `[Retell Webhook] Cleared answers_json for call ${callId} (voicemail)`
+        `[Retell Webhook] Cleared answers_json for call ${callId} (no human reached)`
       );
     }
   } else if (event === "call_analyzed" && hasTranscript) {
     // Prefer call_analyzed as it has more complete data
     // Extraction runs asynchronously but we await to ensure it completes before responding
-    console.log(`[Retell Webhook] Running extraction for call ${callId} (call_analyzed)`);
-    try {
-      await extractAnswers(
-        callId,
-        call.transcript_object as Parameters<typeof extractAnswers>[1],
-        call.transcript ?? null
+    //
+    // IMPORTANT: Also run extraction if call_analyzed is correcting a call_ended mistake
+    // (e.g., call_ended wrongly set status to failed, but human actually answered)
+    //
+    // Check if we need to run extraction (first time or corrective run)
+    const { data: artifacts } = await supabase
+      .from("call_artifacts")
+      .select("answers_json")
+      .eq("call_id", callId)
+      .single();
+
+    const needsExtraction = !artifacts?.answers_json || shouldAllowCallAnalyzedOverride;
+
+    if (needsExtraction) {
+      console.log(
+        `[Retell Webhook] Running extraction for call ${callId} (call_analyzed, corrective=${shouldAllowCallAnalyzedOverride})`
       );
-    } catch (err) {
-      console.error(`[Retell Webhook] Extraction failed for ${callId}:`, err);
-      // Extraction failure is handled inside extractAnswers - no need to update here
+      try {
+        await extractAnswers(
+          callId,
+          call.transcript_object as Parameters<typeof extractAnswers>[1],
+          call.transcript ?? null
+        );
+      } catch (err) {
+        console.error(`[Retell Webhook] Extraction failed for ${callId}:`, err);
+        // Extraction failure is handled inside extractAnswers - no need to update here
+      }
+    } else {
+      console.log(
+        `[Retell Webhook] Skipping extraction for call ${callId} (already extracted)`
+      );
     }
   } else if (event === "call_ended" && hasTranscript) {
     // For call_ended, we set is_extracting=true above but don't run extraction yet
