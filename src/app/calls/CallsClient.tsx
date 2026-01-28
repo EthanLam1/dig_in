@@ -165,6 +165,65 @@ function getReservationStatusLabel(status: string | null): string {
   }
 }
 
+// Voicemail detection phrases
+const VOICEMAIL_PHRASES = [
+  "voicemail",
+  "leave a message",
+  "leave your message",
+  "after the beep",
+  "after the tone",
+  "not available",
+  "can't come to the phone",
+  "cannot come to the phone",
+  "please leave a message",
+  "record your message",
+];
+
+// Derive human-friendly failure explanation
+function getFailureExplanation(
+  failureReason: string | null,
+  failureDetails: string | null,
+  transcriptText: string | null,
+  transcriptJson: TranscriptEntry[] | null
+): string {
+  // Check if failure_details indicates voicemail
+  if (failureDetails) {
+    try {
+      const details = JSON.parse(failureDetails);
+      if (details.in_voicemail === true) {
+        return "The call went to voicemail.";
+      }
+    } catch {
+      // Not valid JSON, continue checking other conditions
+    }
+  }
+
+  // Check transcript for voicemail phrases
+  const fullTranscript = (
+    transcriptText ||
+    (transcriptJson
+      ?.map((entry) => entry.text || "")
+      .join(" ") || "")
+  ).toLowerCase();
+
+  if (VOICEMAIL_PHRASES.some((phrase) => fullTranscript.includes(phrase))) {
+    return "The call went to voicemail.";
+  }
+
+  // Check for "not answered" failure reason
+  if (failureReason === "Your phone call was not answered") {
+    return "The call wasn't answered.";
+  }
+
+  // Use failure_reason if available
+  if (failureReason) {
+    return failureReason;
+  }
+
+  // Default fallback
+  return "The call failed.";
+}
+
 function formatDate(dateString: string): string {
   const date = new Date(dateString);
   return date.toLocaleString();
@@ -623,15 +682,24 @@ export default function CallsClient() {
                 {callDetail.status === "failed" ? (
                   <div className="rounded-md bg-destructive/10 p-4">
                     <p className="font-medium text-destructive">Call Failed</p>
-                    {callDetail.failure_reason && (
-                      <p className="mt-1 text-sm text-destructive">
-                        {callDetail.failure_reason}
-                      </p>
-                    )}
-                    {callDetail.failure_details && (
-                      <p className="mt-1 text-sm text-muted-foreground">
-                        {callDetail.failure_details}
-                      </p>
+                    <p className="mt-1 text-sm text-destructive">
+                      {getFailureExplanation(
+                        callDetail.failure_reason,
+                        callDetail.failure_details,
+                        callDetail.artifacts.transcript_text,
+                        callDetail.artifacts.transcript_json
+                      )}
+                    </p>
+                    {/* Debug section - only in development */}
+                    {process.env.NODE_ENV !== "production" && callDetail.failure_details && (
+                      <details className="mt-3">
+                        <summary className="cursor-pointer text-xs text-muted-foreground hover:text-foreground">
+                          Debug
+                        </summary>
+                        <pre className="mt-2 max-h-40 overflow-auto rounded bg-muted p-2 text-xs">
+                          {callDetail.failure_details}
+                        </pre>
+                      </details>
                     )}
                   </div>
                 ) : (
