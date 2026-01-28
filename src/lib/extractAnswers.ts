@@ -4,6 +4,8 @@
 
 import OpenAI from "openai";
 import { getSupabaseAdmin } from "./supabaseAdmin";
+import { toZonedTime } from "date-fns-tz";
+import { format as formatDate } from "date-fns";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Types matching PROJECT_CONTEXT.md section 6.2
@@ -96,6 +98,79 @@ function formatTimestamp(seconds: number): string {
   const mins = Math.floor(seconds / 60);
   const secs = Math.floor(seconds % 60);
   return `${mins.toString().padStart(2, "0")}:${secs.toString().padStart(2, "0")}`;
+}
+
+/**
+ * Normalizes a datetime string to local ISO format without timezone suffix.
+ * 
+ * CONTRACT: reservation_datetime_local_iso and confirmed_datetime_local_iso
+ * must be "floating" local times (e.g., "2026-01-28T19:00:00") with timezone
+ * stored separately.
+ * 
+ * If the model returns a value with:
+ * - Z suffix (UTC): convert to the provided timezone
+ * - Timezone offset (+05:00, -05:00): convert to the provided timezone
+ * 
+ * Then strip the suffix and return as plain local ISO.
+ * 
+ * @param datetimeStr - The datetime string from extraction (may have Z or offset)
+ * @param timezone - IANA timezone to convert to (e.g., "America/Toronto")
+ * @returns Normalized local ISO string without timezone suffix, or null if invalid
+ */
+function normalizeDatetimeToLocalIso(
+  datetimeStr: string | null | undefined,
+  timezone: string | null | undefined
+): string | null {
+  if (!datetimeStr || !timezone) {
+    return datetimeStr || null;
+  }
+  
+  try {
+    // Check if the string has a timezone suffix (Z or offset like +05:00 or -05:00)
+    const hasZ = datetimeStr.endsWith("Z");
+    const hasOffset = /[+-]\d{2}:\d{2}$/.test(datetimeStr);
+    
+    if (!hasZ && !hasOffset) {
+      // Already a plain local ISO string - validate format and return
+      if (/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}$/.test(datetimeStr)) {
+        return datetimeStr;
+      }
+      // Try to normalize partial formats (e.g., missing seconds)
+      if (/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/.test(datetimeStr)) {
+        return `${datetimeStr}:00`;
+      }
+      // If format is unexpected, log and return as-is
+      console.warn(
+        `[normalizeDatetimeToLocalIso] Unexpected format: ${datetimeStr}. Returning as-is.`
+      );
+      return datetimeStr;
+    }
+    
+    // Parse as UTC date and convert to the specified timezone
+    const utcDate = new Date(datetimeStr);
+    if (isNaN(utcDate.getTime())) {
+      console.warn(
+        `[normalizeDatetimeToLocalIso] Invalid datetime: ${datetimeStr}. Returning null.`
+      );
+      return null;
+    }
+    
+    // Convert UTC to the specified timezone
+    const zonedDate = toZonedTime(utcDate, timezone);
+    
+    // Format as local ISO without timezone suffix
+    const normalizedIso = formatDate(zonedDate, "yyyy-MM-dd'T'HH:mm:ss");
+    
+    console.log(
+      `[normalizeDatetimeToLocalIso] Converted ${datetimeStr} (UTC/offset) -> ` +
+      `${normalizedIso} (local in ${timezone})`
+    );
+    
+    return normalizedIso;
+  } catch (err) {
+    console.error(`[normalizeDatetimeToLocalIso] Error normalizing datetime:`, err);
+    return datetimeStr;
+  }
 }
 
 /**
@@ -228,6 +303,43 @@ async function callOpenAI(
   return parsed;
 }
 
+/**
+ * Normalizes the extraction output to ensure datetime fields follow our contract.
+ * 
+ * - confirmed_datetime_local_iso must be plain local ISO (no Z or offset)
+ * - timezone must be IANA timezone string
+ * 
+ * If the model returns values with Z or offset, they're converted to the 
+ * specified timezone.
+ */
+function normalizeExtractionOutput(
+  extractedData: ExtractionOutput,
+  callData: CallData
+): ExtractionOutput {
+  if (!extractedData.reservation) {
+    return extractedData;
+  }
+  
+  // Use the timezone from extraction, or fall back to the request timezone
+  const timezone = extractedData.reservation.timezone || callData.reservation_timezone;
+  
+  // Normalize confirmed_datetime_local_iso
+  if (extractedData.reservation.confirmed_datetime_local_iso) {
+    const normalized = normalizeDatetimeToLocalIso(
+      extractedData.reservation.confirmed_datetime_local_iso,
+      timezone
+    );
+    extractedData.reservation.confirmed_datetime_local_iso = normalized;
+  }
+  
+  // Ensure timezone is set (use request timezone if extraction didn't provide one)
+  if (!extractedData.reservation.timezone && callData.reservation_timezone) {
+    extractedData.reservation.timezone = callData.reservation_timezone;
+  }
+  
+  return extractedData;
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Main Extraction Function
 // ─────────────────────────────────────────────────────────────────────────────
@@ -290,6 +402,10 @@ export async function extractAnswers(
   let extractedData: ExtractionOutput;
   try {
     extractedData = await callOpenAI(callData as CallData, transcript);
+    
+    // 3a. Normalize datetime fields to match our contract:
+    // confirmed_datetime_local_iso must be plain local ISO (no Z or offset)
+    extractedData = normalizeExtractionOutput(extractedData, callData as CallData);
   } catch (err) {
     const errorMessage =
       err instanceof Error ? err.message : "Unknown extraction error";

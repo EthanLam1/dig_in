@@ -1,6 +1,9 @@
 // src/lib/retell.ts
 // Retell API client for creating outbound phone calls
 
+import { parse } from "date-fns";
+import { toZonedTime, fromZonedTime } from "date-fns-tz";
+
 const RETELL_API_URL = "https://api.retellai.com/v2/create-phone-call";
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -221,15 +224,45 @@ function formatPhoneForTTS(phoneE164: string): string {
 }
 
 /**
+ * Extracts the hour from a local ISO datetime string (e.g., "2026-01-28T19:00:00" -> 19)
+ */
+function extractHourFromLocalIso(datetimeLocalIso: string): number | null {
+  try {
+    // Parse "2026-01-28T19:00:00" format
+    const match = datetimeLocalIso.match(/T(\d{2}):/);
+    if (match) {
+      return parseInt(match[1], 10);
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Formats a local ISO datetime string for human-readable speech.
+ * 
+ * CRITICAL: The datetimeLocalIso is a "floating" local time in the specified timezone.
+ * We must parse it as "in that timezone" rather than using new Date() which interprets
+ * it in the server's local timezone.
+ * 
  * Always uses explicit calendar date + time (no relative terms like "today" or "tomorrow").
  * Uses FULL weekday and month names (never abbreviations) for TTS clarity.
- * e.g., "2026-01-27T19:00:00" -> "Tuesday, January 27 at 7:00 PM"
+ * e.g., "2026-01-27T19:00:00" in "America/Toronto" -> "Tuesday, January 27 at 7:00 PM"
  */
 function formatDateTimeForAgent(datetimeLocalIso: string, timezone: string): string {
   try {
-    // Parse the datetime and format it in the specified timezone
-    const date = new Date(datetimeLocalIso);
+    // Extract the intended local hour from the input for validation
+    const intendedHour = extractHourFromLocalIso(datetimeLocalIso);
+    
+    // Parse the local ISO string as a date in the specified timezone
+    // fromZonedTime converts "this local time in timezone X" to a UTC Date object
+    // This is the correct approach: treat datetimeLocalIso as local time in reservation_timezone
+    const parsedLocalDate = parse(datetimeLocalIso, "yyyy-MM-dd'T'HH:mm:ss", new Date());
+    const utcDate = fromZonedTime(parsedLocalDate, timezone);
+    
+    // Convert back to the timezone for display (toZonedTime gives us the local representation)
+    const zonedDate = toZonedTime(utcDate, timezone);
     
     // Format with explicit FULL weekday, FULL month, and day - never use abbreviations or relative terms
     const dateTimeOptions: Intl.DateTimeFormatOptions = {
@@ -242,8 +275,8 @@ function formatDateTimeForAgent(datetimeLocalIso: string, timezone: string): str
       hour12: true,
     };
     
-    // Format as "Tuesday, January 27, 7:00 PM" then adjust to "Tuesday, January 27 at 7:00 PM"
-    const parts = new Intl.DateTimeFormat("en-US", dateTimeOptions).formatToParts(date);
+    // Format using Intl with the UTC date and timezone option
+    const parts = new Intl.DateTimeFormat("en-US", dateTimeOptions).formatToParts(utcDate);
     
     const weekday = parts.find((p) => p.type === "weekday")?.value || "";
     const month = parts.find((p) => p.type === "month")?.value || "";
@@ -252,10 +285,70 @@ function formatDateTimeForAgent(datetimeLocalIso: string, timezone: string): str
     const minute = parts.find((p) => p.type === "minute")?.value || "";
     const dayPeriod = parts.find((p) => p.type === "dayPeriod")?.value || "";
     
+    // GUARDRAIL: Validate the formatted hour matches the intended hour
+    const formattedHour24 = zonedDate.getHours();
+    if (intendedHour !== null && formattedHour24 !== intendedHour) {
+      // Classic UTC shift detected - log error and fall back to conservative formatting
+      console.error(
+        `[formatDateTimeForAgent] Hour mismatch detected! ` +
+        `Input: ${datetimeLocalIso} (intended hour: ${intendedHour}), ` +
+        `Timezone: ${timezone}, ` +
+        `Formatted hour (24h): ${formattedHour24}. ` +
+        `Falling back to conservative format.`
+      );
+      
+      // Conservative fallback: manually format from the raw ISO string
+      return formatFromRawIso(datetimeLocalIso);
+    }
+    
     // Build: "Tuesday, January 27 at 7:00 PM"
     return `${weekday}, ${month} ${day} at ${hour}:${minute} ${dayPeriod}`;
+  } catch (err) {
+    console.error(`[formatDateTimeForAgent] Failed to format datetime:`, err);
+    // Fallback to conservative format if parsing fails
+    return formatFromRawIso(datetimeLocalIso);
+  }
+}
+
+/**
+ * Conservative fallback formatter that parses the raw ISO string directly.
+ * This avoids any timezone conversion that could introduce errors.
+ * e.g., "2026-01-28T19:00:00" -> "January 28 at 7:00 PM"
+ */
+function formatFromRawIso(datetimeLocalIso: string): string {
+  try {
+    // Parse the ISO string manually
+    const match = datetimeLocalIso.match(/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})/);
+    if (!match) {
+      return datetimeLocalIso;
+    }
+    
+    const [, yearStr, monthStr, dayStr, hourStr, minuteStr] = match;
+    const month = parseInt(monthStr, 10);
+    const day = parseInt(dayStr, 10);
+    const hour24 = parseInt(hourStr, 10);
+    const minute = minuteStr;
+    
+    // Convert to 12-hour format
+    const hour12 = hour24 === 0 ? 12 : hour24 > 12 ? hour24 - 12 : hour24;
+    const period = hour24 < 12 ? "AM" : "PM";
+    
+    // Get month name
+    const monthNames = [
+      "January", "February", "March", "April", "May", "June",
+      "July", "August", "September", "October", "November", "December"
+    ];
+    const monthName = monthNames[month - 1] || monthStr;
+    
+    // Get weekday from the date
+    const date = new Date(parseInt(yearStr, 10), month - 1, day);
+    const weekdayNames = [
+      "Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"
+    ];
+    const weekday = weekdayNames[date.getDay()];
+    
+    return `${weekday}, ${monthName} ${day} at ${hour12}:${minute} ${period}`;
   } catch {
-    // Fallback to raw string if parsing fails
     return datetimeLocalIso;
   }
 }
